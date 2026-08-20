@@ -125,8 +125,12 @@ class TestAC9SchemaInit:
         engine.dispose()
 
     def test_no_ddl_alteration_on_existing_target(self, tmp_path: Path):
-        """Initialization must not execute any DROP/CREATE INDEX/COLUMN DDL
-        on a compatible existing target — only PRAGMA and SELECT are allowed.
+        """Initialization must not execute any table/index DDL on a compatible
+        existing target.
+
+        T-019 semantics: a legacy (unstamped) schema that structurally matches
+        head gets exactly ONE new object — the ``alembic_version`` stamp.
+        Stamped restarts are pure no-ops afterwards.
 
         Regression: previous _migrate_friend_request_constraint would DROP
         uq_pair_state and CREATE ix_active_pair on every startup.
@@ -135,36 +139,188 @@ class TestAC9SchemaInit:
         engine = _create_test_engine(db_path)
         _init_test_engine(engine)
 
-        # Snapshot schema (table+index definitions) before init
-        with engine.connect() as conn:
-            before = {
-                r[0]: r[1]
-                for r in conn.execute(
-                    text(
-                        "SELECT type, sql FROM sqlite_master "
-                        "WHERE type IN ('table', 'index') ORDER BY name"
-                    )
-                ).fetchall()
-            }
+        def _schema_snapshot():
+            with engine.connect() as conn:
+                return {
+                    (r[0], r[1]): r[2]
+                    for r in conn.execute(
+                        text(
+                            "SELECT type, name, sql FROM sqlite_master "
+                            "WHERE type IN ('table', 'index') ORDER BY name"
+                        )
+                    ).fetchall()
+                }
 
-        # Re-run init (simulating a server restart)
+        before = _schema_snapshot()
+
+        # First init pass: structure matches head -> stamped at head
+        validate_and_initialize_schema(engine)
+        after_first = _schema_snapshot()
+
+        # The only new object allowed is the alembic_version stamp table
+        added = set(after_first) - set(before)
+        removed = set(before) - set(after_first)
+        assert removed == set(), f"Init dropped schema objects: {removed}"
+        # (the stamp table plus SQLite's autoindex on its primary key)
+        assert added <= {
+            ("table", "alembic_version"),
+            ("index", "sqlite_autoindex_alembic_version_1"),
+        }, f"Unexpected schema objects added: {added}"
+        assert ("table", "alembic_version") in added
+
+        # Second init pass (real restart): stamped DB must be byte-identical
+        validate_and_initialize_schema(engine)
+        after_second = _schema_snapshot()
+        assert after_first == after_second, (
+            "Stamped restart mutated the schema — DDL was executed. "
+            f"Difference: {set(after_first) ^ set(after_second)}"
+        )
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# T-019: Alembic is the single schema authority on SQLite
+# ---------------------------------------------------------------------------
+
+class TestT019AlembicAuthority:
+    def test_fresh_db_is_created_by_alembic_and_stamped_at_head(self, tmp_path: Path):
+        """A brand-new file is populated by `alembic upgrade head` (not
+        create_all) and carries the head revision stamp."""
+        from ting_ting.database import _alembic_head_revision
+
+        db_path = str(tmp_path / "alembic_fresh.db")
+        engine = _create_test_engine(db_path)
+
         validate_and_initialize_schema(engine)
 
-        # Schema must be identical — no DDL was executed
-        with engine.connect() as conn:
-            after = {
-                r[0]: r[1]
-                for r in conn.execute(
-                    text(
-                        "SELECT type, sql FROM sqlite_master "
-                        "WHERE type IN ('table', 'index') ORDER BY name"
-                    )
-                ).fetchall()
-            }
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        for expected in ("users", "posts", "sessions", "alembic_version"):
+            assert expected in tables
+        # every mapped table exists
+        from ting_ting.models import Base
+        assert set(Base.metadata.tables) <= tables
 
-        assert before == after, (
-            "Schema changed by initialization — DDL was executed. "
-            f"Difference:\nBefore keys: {sorted(before.keys())}\n"
-            f"After keys:  {sorted(after.keys())}"
+        with engine.connect() as conn:
+            rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert rev == _alembic_head_revision()
+        engine.dispose()
+
+    def test_stamped_db_behind_head_upgrades_preserving_data(self, tmp_path: Path):
+        """A stamped database at an older revision is upgraded to head on
+        startup without losing data (the 0007 posts rebuild must keep rows)."""
+        from sqlalchemy.orm import sessionmaker
+
+        from ting_ting.database import (
+            _alembic_head_revision,
+            _with_database_url,
         )
+        from ting_ting.models import Comment, Like, Post, User
+
+        db_path = str(tmp_path / "alembic_behind.db")
+        engine = _create_test_engine(db_path)
+
+        # Build the DB at revision 0005 (pre-sessions, pre-posts-cascade)
+        with _with_database_url(engine):
+            from ting_ting.database import _alembic_config
+            from alembic import command as _alembic_command
+            _alembic_command.upgrade(_alembic_config(), "20260819_0005")
+
+        sm = sessionmaker(bind=engine, expire_on_commit=False)
+        with sm() as s:
+            author = User(
+                username="survivor", email="survivor@example.com",
+                password_hash="$2b$12$fakehashfordata",
+            )
+            s.add(author)
+            s.flush()
+            post = Post(author_id=author.id, content="keep me", audience="PUBLIC")
+            s.add(post)
+            s.flush()
+            s.add(Like(user_id=author.id, post_id=post.id))
+            s.add(Comment(post_id=post.id, author_id=author.id, content="child"))
+            s.commit()
+            post_id = post.id
+
+        # Restart on an older revision -> validates + upgrades to head
+        validate_and_initialize_schema(engine)
+
+        from ting_ting.database import _current_revision
+        assert _current_revision(engine) == _alembic_head_revision()
+
+        with sm() as s:
+            rows = s.execute(
+                text(
+                    "SELECT (SELECT COUNT(*) FROM likes WHERE post_id=:p), "
+                    "(SELECT COUNT(*) FROM comments WHERE post_id=:p), "
+                    "(SELECT content FROM posts WHERE id=:p)"
+                ),
+                {"p": post_id},
+            ).one()
+        assert rows[0] == 1 and rows[1] == 1 and rows[2] == "keep me"
+        engine.dispose()
+
+    def test_legacy_unstamped_matching_db_is_stamped_at_head(self, tmp_path: Path):
+        """Legacy create_all schema (structurally == head) + data -> stamped
+        at head, data preserved, no table DDL (covered alongside data check)."""
+        from sqlalchemy.orm import sessionmaker
+
+        from ting_ting.database import _alembic_head_revision, _current_revision
+
+        db_path = str(tmp_path / "legacy.db")
+        engine = _create_test_engine(db_path)
+        _init_test_engine(engine)
+
+        sm = sessionmaker(bind=engine, expire_on_commit=False)
+        with sm() as s:
+            u = User(
+                username="legacy", email="legacy@example.com",
+                password_hash="$2b$12$fakehashfordata",
+            )
+            s.add(u)
+            s.commit()
+
+        validate_and_initialize_schema(engine)
+
+        assert _current_revision(engine) == _alembic_head_revision()
+        with sm() as s:
+            assert s.get(User, u.id) is not None
+        engine.dispose()
+
+    def test_legacy_unstamped_drifted_db_fails_closed(self, tmp_path: Path):
+        """An unstamped schema that drifted from head (missing `sessions`)
+        is refused BEFORE any mutation — no alembic_version gets created."""
+        db_path = str(tmp_path / "drifted.db")
+        engine = _create_test_engine(db_path)
+        _init_test_engine(engine)
+        with engine.connect() as conn:
+            conn.execute(text("DROP TABLE sessions"))
+            conn.commit()
+
+        with pytest.raises(ValueError, match="not Alembic-stamped"):
+            validate_and_initialize_schema(engine)
+
+        inspector = inspect(engine)
+        assert "alembic_version" not in set(inspector.get_table_names())
+        assert "sessions" not in set(inspector.get_table_names())
+        engine.dispose()
+
+    def test_stamped_db_at_head_is_a_noop(self, tmp_path: Path):
+        """Restart on a current database performs schema reads only."""
+        db_path = str(tmp_path / "at_head.db")
+        engine = _create_test_engine(db_path)
+        validate_and_initialize_schema(engine)
+
+        def _snapshot():
+            with engine.connect() as conn:
+                return sorted(
+                    f"{r[0]}/{r[1]}"
+                    for r in conn.execute(
+                        text("SELECT type, name FROM sqlite_master ORDER BY name")
+                    ).fetchall()
+                )
+
+        before = _snapshot()
+        validate_and_initialize_schema(engine)
+        assert before == _snapshot()
         engine.dispose()

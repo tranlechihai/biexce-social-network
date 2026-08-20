@@ -1,24 +1,40 @@
-"""Database engine, session factory, and schema validation.
+"""Database engine, session factory, and schema initialization.
 
-SQLite keeps the create-only development path. PostgreSQL schema changes are
-owned by Alembic and application startup only validates their presence.
+T-019: Alembic is the single source of truth for schema evolution on BOTH
+SQLite and PostgreSQL.
+
+SQLite startup semantics:
+* fresh file (no ``users`` table)            -> ``alembic upgrade head``
+* stamped (``alembic_version`` present)      -> ``alembic upgrade head``
+  (no-op at head; applies pending migrations when behind), then verify head
+* legacy unstamped create_all schema         -> strict structural check
+  against head; if it matches -> ``alembic stamp head``; otherwise fail
+  closed (no implicit ``create_all`` patching)
+
+PostgreSQL startup only validates that the required tables exist (operators
+run ``alembic upgrade head``).
 """
 
+import contextlib
+import os
+import re
 from collections.abc import Generator
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import (
     create_engine,
     event,
     inspect,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from ting_ting.config import Settings
-from ting_ting.models import (
-    Activity, Base, Block, Comment, Follow, FriendRequest, Like,
-    Mute, Post, PostMedia, Report, Repost, SavedPost, UserProfile,
-)
+from ting_ting.models import Base
 
 
 def enable_sqlite_foreign_keys(engine: Engine) -> None:
@@ -75,50 +91,183 @@ def get_db() -> Generator:
 
 
 # ---------------------------------------------------------------------------
-# Schema initialization  —  create-only, never destructive
+# Alembic runtime (embedded) — the single schema authority
 # ---------------------------------------------------------------------------
 
-# Tables whose presence triggers the compatibility gate.  We only gate on
-# ``users`` — adding new tables (friend_requests, blocks) for an existing,
-# compatible target is safe because ``create_all`` is idempotent for missing
-# tables.
-REQUIRED_TABLES: set[str] = {"users"}
+_ALEMBIC_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _alembic_config() -> AlembicConfig:
+    """Alembic config resolved relative to the repo, not the CWD."""
+    cfg = AlembicConfig(str(_ALEMBIC_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_ALEMBIC_ROOT / "alembic"))
+    return cfg
+
+
+@contextlib.contextmanager
+def _with_database_url(engine: Engine):
+    """Point ``alembic/env.py`` at *this* engine's URL for the upgrade call.
+
+    env.py reads ``TING_DATABASE_URL`` from the environment; overriding it
+    here (and restoring afterwards) guarantees the embedded run touches the
+    engine we are initializing — not whatever URL the process env holds.
+    """
+    url = engine.url.render_as_string(hide_password=True)
+    old = os.environ.get("TING_DATABASE_URL")
+    os.environ["TING_DATABASE_URL"] = url
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TING_DATABASE_URL", None)
+        else:
+            os.environ["TING_DATABASE_URL"] = old
+
+
+def _alembic_head_revision() -> str:
+    return ScriptDirectory.from_config(_alembic_config()).get_current_head()
+
+
+def _alembic_upgrade_head(engine: Engine) -> None:
+    with _with_database_url(engine):
+        command.upgrade(_alembic_config(), "head")
+
+
+def _alembic_stamp_head(engine: Engine) -> None:
+    with _with_database_url(engine):
+        command.stamp(_alembic_config(), "head")
+
+
+def _current_revision(engine: Engine) -> str | None:
+    insp = inspect(engine)
+    if "alembic_version" not in insp.get_table_names():
+        return None
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+
+
+def _require_head(engine: Engine) -> None:
+    """Fail closed when the database is not at the head revision."""
+    current = _current_revision(engine)
+    head = _alembic_head_revision()
+    if current != head:
+        raise ValueError(
+            f"Database schema is at revision {current!r} but head is {head!r}. "
+            "Run 'alembic upgrade head'."
+        )
+
+
+# Structural expectations a legacy (pre-Alembic) create_all database must
+# satisfy before we are allowed to stamp it at head. If any of these is
+# missing the schema has drifted and must be fixed/rebuilt by an operator.
+_LEGACY_REQUIRED_CHECK_CONSTRAINTS = (
+    "ck_follow_not_self",
+    "ck_activity_kind",
+    "ck_friend_request_state",
+    "ck_friend_request_not_self",
+    "ck_friend_request_canonical",
+    "ck_post_audience",
+    "ck_mute_not_self",
+    "ck_mute_exactly_one_target",
+    "ck_report_reason",
+    "ck_report_status",
+)
+_LEGACY_REQUIRED_FK_ACTIONS = (
+    # (table, from_col, reftable, ondelete)
+    ("posts", "author_id", "users", "CASCADE"),
+    ("post_media", "post_id", "posts", "CASCADE"),
+    ("likes", "post_id", "posts", "CASCADE"),
+    ("comments", "post_id", "posts", "CASCADE"),
+    ("comments", "parent_comment_id", "comments", "CASCADE"),
+    ("saved_posts", "post_id", "posts", "CASCADE"),
+    ("reposts", "post_id", "posts", "CASCADE"),
+    ("activities", "post_id", "posts", "CASCADE"),
+    ("sessions", "user_id", "users", "CASCADE"),
+    ("reports", "post_id", "posts", "SET NULL"),
+    ("reports", "comment_id", "comments", "SET NULL"),
+)
+
+
+def _legacy_schema_matches_head(engine: Engine) -> bool:
+    """True when an unstamped SQLite schema is structurally == Alembic head.
+
+    Checks: every mapped table with all its columns, the FK delete actions
+    introduced by migrations 0002/0005/0006/0007, and the named check
+    constraints. A single miss means drift — refuse to stamp.
+    """
+    insp = inspect(engine)
+    try:
+        existing_tables = set(insp.get_table_names())
+        for table in Base.metadata.tables.values():
+            if table.name not in existing_tables:
+                return False
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            want = {c.name for c in table.columns}
+            if not want.issubset(have):
+                return False
+
+        with engine.connect() as conn:
+            create_sql = {
+                name: (sql or "")
+                for name, sql in conn.execute(
+                    text("SELECT name, sql FROM sqlite_master WHERE type='table'")
+                )
+            }
+
+        for table, col, reftable, action in _LEGACY_REQUIRED_FK_ACTIONS:
+            sql = create_sql.get(table)
+            if sql is None:
+                return False
+            if _fk_delete_action(sql, col, reftable) != action:
+                return False
+
+        return all(any(c in sql for sql in create_sql.values()) for c in _LEGACY_REQUIRED_CHECK_CONSTRAINTS)
+    except Exception:
+        # Introspection failure is drift from our point of view — fail closed.
+        return False
+
+
+def _fk_delete_action(create_sql: str, col: str, reftable: str) -> str | None:
+    """ON DELETE action of ``FOREIGN KEY(col) REFERENCES reftable (...)`` in a
+    CREATE TABLE statement (SQLite default: NO ACTION).
+
+    The SQLite inspector in SQLAlchemy 2.0.x reports ``ondelete=None``, so the
+    action is read from the persisted DDL instead.
+    """
+    pattern = (
+        r"FOREIGN KEY\(\s*"
+        + re.escape(col)
+        + r"\s*\)\s*REFERENCES\s+"
+        + re.escape(reftable)
+        + r"\s*\(\s*\w+\s*\)"
+        + r"(?:\s+ON\s+DELETE\s+(SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT|NO\s+ACTION))?"
+    )
+    match = re.search(pattern, create_sql, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1).upper() if match.group(1) else "NO ACTION"
+
+
+# ---------------------------------------------------------------------------
+# Schema initialization
+# ---------------------------------------------------------------------------
 
 # Minimum expected columns on the 'users' table for compatibility.
 _USERS_REQUIRED_COLUMNS: set[str] = {
     "id", "username", "email", "password_hash", "display_name", "bio",
 }
 
-# Tables introduced by t-002, t-003, and t-004 that must exist for full MVP functionality.
-_SOCIAL_TABLES = [
-    FriendRequest.__table__,
-    Block.__table__,
-    Post.__table__,
-    Like.__table__,
-    Comment.__table__,
-    UserProfile.__table__,
-    Follow.__table__,
-    Activity.__table__,
-    SavedPost.__table__,
-    Repost.__table__,
-    PostMedia.__table__,
-    Mute.__table__,
-    Report.__table__,
-]
-
 
 def validate_and_initialize_schema(
     engine: Engine | None = None,
 ) -> Engine:
-    """Validate a supported target and initialize SQLite development schemas.
-
-    Phases:
-    PostgreSQL must already be upgraded with ``alembic upgrade head``. Startup
-    never performs implicit production DDL.
+    """Validate the target and bring the schema to the Alembic head.
 
     Raises ``ValueError`` for:
-    * non-SQLite backends,
-    * incompatible existing Ting Ting columns,
+    * non-SQLite/PostgreSQL backends,
+    * incompatible existing 'users' columns,
+    * stale or unknown revisions,
+    * unstamped legacy SQLite schemas that do not structurally match head.
     """
     if engine is None:
         engine = get_engine()
@@ -127,9 +276,6 @@ def validate_and_initialize_schema(
         raise ValueError(
             f"Database backend must be sqlite or postgresql; got '{engine.name}'."
         )
-
-    if engine.name == "sqlite":
-        enable_sqlite_foreign_keys(engine)
 
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
@@ -142,30 +288,44 @@ def validate_and_initialize_schema(
                 "PostgreSQL schema is not at the required Alembic revision; "
                 f"missing tables {sorted(missing_tables)!r}. Run 'alembic upgrade head'."
             )
-
-    # 3) Compatibility gate: if *any* required table already exists, the
-    # ``users`` table must have all expected columns.
-    if REQUIRED_TABLES & existing_tables:
-        if "users" in existing_tables:
-            existing_cols = {
-                col["name"] for col in inspector.get_columns("users")
-            }
-            missing = _USERS_REQUIRED_COLUMNS - existing_cols
-            if missing:
-                raise ValueError(
-                    f"Incompatible existing 'users' table — expected columns "
-                    f"{_USERS_REQUIRED_COLUMNS!r} but missing {missing!r}. "
-                    "Will not mutate an incompatible database."
-                )
-        if engine.name == "postgresql":
-            return engine
-        # Existing SQLite schema is compatible — create missing social/post tables only
-        # (create_all is safe for tables that already exist).
-        Base.metadata.create_all(engine, tables=_SOCIAL_TABLES)
         return engine
 
-    # No required SQLite table exists — create all development tables.
-    Base.metadata.create_all(engine)
+    # --- SQLite: Alembic is the schema authority ---
+    enable_sqlite_foreign_keys(engine)
+
+    if "users" in existing_tables:
+        existing_cols = {col["name"] for col in inspector.get_columns("users")}
+        missing = _USERS_REQUIRED_COLUMNS - existing_cols
+        if missing:
+            raise ValueError(
+                f"Incompatible existing 'users' table — expected columns "
+                f"{_USERS_REQUIRED_COLUMNS!r} but missing {missing!r}. "
+                "Will not mutate an incompatible database."
+            )
+
+    if "alembic_version" in existing_tables:
+        # Stamped: apply pending migrations (no-op when already at head).
+        _alembic_upgrade_head(engine)
+    elif "users" in existing_tables:
+        # Legacy create_all schema: stamp only when structurally == head.
+        if not _legacy_schema_matches_head(engine):
+            raise ValueError(
+                "Existing SQLite schema is not Alembic-stamped and does not "
+                "structurally match the head revision. Back up the database, "
+                "then repair or rebuild it via Alembic — startup will not "
+                "patch it implicitly."
+            )
+        _alembic_stamp_head(engine)
+    else:
+        # Fresh file (may contain unrelated extra tables, which survive).
+        _alembic_upgrade_head(engine)
+
+    if "users" not in inspect(engine).get_table_names():
+        raise ValueError(
+            "Schema initialization finished but the 'users' table is missing — "
+            "refusing to start on an invalid database."
+        )
+    _require_head(engine)
     return engine
 
 
@@ -184,14 +344,13 @@ def _create_test_engine(db_path: str) -> Engine:
 
 
 def _init_test_engine(engine: Engine) -> Engine:
-    """Initialize MVP tables on ``engine`` (create-only)."""
+    """Initialize MVP tables on ``engine`` (create-only test fast-path).
+
+    Test databases are built with ``create_all`` for speed; app startup still
+    validates them through :func:`validate_and_initialize_schema` (which
+    stamps them at head when structurally complete).
+    """
     if engine.name == "sqlite":
         enable_sqlite_foreign_keys(engine)
-    inspector = inspect(engine)
-    existing = set(inspector.get_table_names())
-    if not (REQUIRED_TABLES & existing):
-        Base.metadata.create_all(engine)
-    else:
-        # Compatible existing target — add any missing social tables.
-        Base.metadata.create_all(engine, tables=_SOCIAL_TABLES)
+    Base.metadata.create_all(engine)
     return engine
