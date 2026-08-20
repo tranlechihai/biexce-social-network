@@ -1,6 +1,7 @@
 """Pydantic request/response schemas for auth, profile, and social graph."""
 
 import re
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -100,6 +101,29 @@ class ProfileUpdateRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # T-021: rotating opaque refresh token (None when the request could not
+    # bind a new one, e.g. legacy JWT-only refresh).
+    refresh_token: str | None = None
+
+
+class RefreshRequest(BaseModel):
+    """Body for POST /auth/refresh.
+
+    ``refresh_token`` is optional: when absent (or the cookie is used) the
+    endpoint falls back to re-minting from a still-valid access JWT — the
+    pre-T-021 behavior, kept for backward compatibility.
+    """
+
+    refresh_token: str | None = None
+
+
+class SessionItem(BaseModel):
+    """One server-side session as listed by GET /auth/sessions."""
+
+    id: str
+    created_at: datetime
+    expires_at: datetime
+    current: bool = False
 
 
 # ---------------------------------------------------------------------------

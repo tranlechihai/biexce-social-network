@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     text,
@@ -380,6 +381,39 @@ class AuthSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, default=None,
+    )
+
+
+class RefreshToken(Base):
+    """Rotating opaque refresh token bound to a server-side session (T-021).
+
+    Only the SHA-256 hash of the token is stored. Every successful use
+    rotates the token: the row is revoked and ``replaced_by_id`` points at
+    the successor. Re-presenting an already-rotated token is a replay —
+    the whole session is killed as a side effect.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None,
+    )
+    replaced_by_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_refresh_token_hash"),
     )
 
 

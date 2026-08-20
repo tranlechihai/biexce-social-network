@@ -129,6 +129,16 @@ and refuses a non-empty target.
   revokes the current session (token dies even if the cookie survives),
   `POST /api/v1/auth/logout-all` revokes every session, and
   `POST /api/v1/auth/change-password` revokes all other sessions.
+- Refresh tokens (T-021): login returns a rotating opaque
+  `refresh_token` (and a `ting_ting_refresh` HttpOnly cookie for
+  browsers). `POST /api/v1/auth/refresh` accepts it via JSON body or
+  cookie and works while the access JWT is expired — the presented token
+  is single-use (rotation); re-presenting a rotated token revokes the
+  whole session (`401 refresh_replay`). Without a refresh token the
+  endpoint falls back to re-minting from a still-valid JWT.
+  `GET /api/v1/auth/sessions` lists active sessions for the account
+  (`current` flags this one); `DELETE /api/v1/auth/sessions/{id}`
+  revokes one.
 - Media delivery is authorized via `/media/{filename}`; uploads are
   validated (magic bytes + blocked-content scan) and quota-limited per user
   and per fleet.

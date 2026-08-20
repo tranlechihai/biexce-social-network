@@ -15,14 +15,17 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ting_ting import refresh as refresh_service
 from ting_ting.auth import (
     clear_auth_cookie,
+    clear_refresh_cookie,
     create_token,
     get_current_user_web,
     hash_password,
     normalize_email,
     normalize_username,
     set_auth_cookie,
+    set_refresh_cookie,
     verify_password,
 )
 from ting_ting.config import Settings, get_settings
@@ -357,6 +360,7 @@ async def register_submit(
     db.add(new_user)
     db.flush()  # assign new_user.id before the session row references it
     session = session_service.create_session(db, new_user.id, settings)
+    refresh_value = refresh_service.issue_refresh_token(db, session, settings)
     db.commit()
     db.refresh(new_user)
 
@@ -364,6 +368,7 @@ async def register_submit(
     token = create_token(new_user.id, new_user.username, session.id, settings)
     redirect = RedirectResponse(url="/web/feed", status_code=303)
     set_auth_cookie(redirect, token, secure=settings.cookie_secure)
+    set_refresh_cookie(redirect, refresh_value, secure=settings.cookie_secure)
     return redirect
 
 
@@ -402,10 +407,12 @@ async def login_submit(
                         old={"identifier": identifier})
 
     session = session_service.create_session(db, user.id, settings)
+    refresh_value = refresh_service.issue_refresh_token(db, session, settings)
     db.commit()
     token = create_token(user.id, user.username, session.id, settings)
     redirect = RedirectResponse(url="/web/feed", status_code=303)
     set_auth_cookie(redirect, token, secure=settings.cookie_secure)
+    set_refresh_cookie(redirect, refresh_value, secure=settings.cookie_secure)
     return redirect
 
 
@@ -422,6 +429,7 @@ async def logout_submit(
         db.commit()
     redirect = RedirectResponse(url="/web/login", status_code=303)
     clear_auth_cookie(redirect)
+    clear_refresh_cookie(redirect)
     return redirect
 
 
@@ -435,6 +443,7 @@ async def logout_all_submit(
     db.commit()
     redirect = RedirectResponse(url="/web/login", status_code=303)
     clear_auth_cookie(redirect)
+    clear_refresh_cookie(redirect)
     return redirect
 
 

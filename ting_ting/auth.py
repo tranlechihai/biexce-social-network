@@ -227,6 +227,12 @@ class WebBanned(Exception):
     """
 
 
+REFRESH_COOKIE_NAME = "ting_ting_refresh"
+# Refresh tokens live as long as the session can (settings.session_expire_days);
+# 7 days matches the default settings.
+_REFRESH_COOKIE_MAX_AGE = 7 * 24 * 3600
+
+
 def set_auth_cookie(response: Response, token: str, secure: bool) -> None:
     """Set the auth cookie with HttpOnly and SameSite attributes."""
     response.set_cookie(
@@ -240,10 +246,30 @@ def set_auth_cookie(response: Response, token: str, secure: bool) -> None:
     )
 
 
+def set_refresh_cookie(response: Response, token: str, secure: bool) -> None:
+    """Persist the rotating refresh token for browser clients (T-021)."""
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        max_age=_REFRESH_COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
 def clear_auth_cookie(response: Response) -> None:
     """Remove the auth cookie so subsequent cookie-only requests are unauthenticated."""
     response.delete_cookie(
         key=_JWT_COOKIE_NAME,
+        path="/",
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
         path="/",
     )
 
