@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Tìm kiếm — Biexce{% endblock %}
+{% block content %}
+<div class="people-page">
+  <div class="page-heading"><div><h1>Tìm kiếm</h1><p class="muted">Tìm người theo tên người dùng hoặc tên hiển thị.</p></div></div>
+  <form class="people-search" action="/web/people" method="get" role="search">
+    <span aria-hidden="true">⌕</span>
+    <input type="search" name="q" value="{{ query or '' }}" placeholder="Tìm kiếm trên Biexce" aria-label="Tìm người" autofocus>
+    {% if query %}<a href="/web/people" class="clear-search">Xóa</a>{% endif %}
+  </form>
+
+  {% if incoming %}
+  <section class="people-section"><h2>Lời mời kết bạn <span class="count-pill">{{ incoming|length }}</span></h2>
+    <div class="people-list">{% for item in incoming %}
+      <article class="person-list-row">
+        <a href="/web/profile/{{ item.user.username }}" class="person-main"><span class="avatar">{% if item.user.avatar %}<img src="{{ item.user.avatar }}" alt="">{% else %}{{ (item.user.display_name or item.user.username)[0]|upper }}{% endif %}</span><span><strong>{{ item.user.display_name or item.user.username }}</strong><small>@{{ item.user.username }}</small></span></a>
+        <div class="button-row"><form action="/web/social/accept-request" method="post"><input type="hidden" name="request_id" value="{{ item.request_id }}"><button class="btn btn-primary">Xác nhận</button></form><form action="/web/social/reject-request" method="post"><input type="hidden" name="request_id" value="{{ item.request_id }}"><button class="btn btn-secondary">Xóa</button></form></div>
+      </article>{% endfor %}</div>
+  </section>{% endif %}
+
+  <section class="people-section"><h2>{% if query %}Kết quả{% else %}Gợi ý cho bạn{% endif %}</h2>
+    <div class="people-list">{% for person in people %}
+      <article class="person-list-row">
+        <a href="/web/profile/{{ person.username }}" class="person-main"><span class="avatar">{% if person.avatar %}<img src="{{ person.avatar }}" alt="">{% else %}{{ (person.display_name or person.username)[0]|upper }}{% endif %}</span><span><strong>{{ person.display_name or person.username }}</strong><small>@{{ person.username }}</small>{% if person.bio %}<small class="person-bio">{{ person.bio }}</small>{% endif %}</span></a>
+        <div class="button-row">{% if person.followed %}<form action="/web/social/unfollow" method="post"><input type="hidden" name="target_username" value="{{ person.username }}"><button class="btn btn-outline">Đang theo dõi</button></form>{% else %}<form action="/web/social/follow" method="post"><input type="hidden" name="target_username" value="{{ person.username }}"><button class="btn btn-outline">Theo dõi</button></form>{% endif %}<form action="/web/social/mute" method="post"><input type="hidden" name="target_username" value="{{ person.username }}"><button class="btn btn-secondary {% if person.muted %}active{% endif %}">{% if person.muted %}Đang giấu{% else %}Giấu{% endif %}</button></form></div>
+      </article>
+    {% else %}<p class="empty-state">Không tìm thấy người phù hợp.</p>{% endfor %}</div>
+  </section>
+
+  {% if friends %}<section class="people-section"><h2>Bạn bè</h2><div class="people-list">{% for friend in friends %}<a class="person-list-row person-main" href="/web/profile/{{ friend.username }}"><span class="avatar">{% if friend.avatar %}<img src="{{ friend.avatar }}" alt="">{% else %}{{ (friend.display_name or friend.username)[0]|upper }}{% endif %}</span><span><strong>{{ friend.display_name or friend.username }}</strong><small>@{{ friend.username }}</small></span></a>{% endfor %}</div></section>{% endif %}
+</div>
+{% endblock %}

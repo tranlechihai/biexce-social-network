@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Viết bài mới — Nodi{% endblock %}
+{% block container_class %}app-shell{% endblock %}
+{% block content %}
+<section class="feed-column nodi-page-column">
+  <header class="nodi-page-header">
+    <div><small>TẠO NỘI DUNG</small><h1>Viết bài mới</h1></div>
+    <a class="icon-button" href="/web/feed" aria-label="Đóng"><svg><use href="#i-x"/></svg></a>
+  </header>
+
+  <form class="create-panel" action="/web/posts/create" method="post" enctype="multipart/form-data">
+    <div class="create-author">
+      <span class="avatar avatar-md">{% if user.avatar %}<img src="{{ user.avatar }}" alt="">{% else %}{{ (user.display_name or user.username)[0]|upper }}{% endif %}</span>
+      <span><strong>{{ user.display_name or user.username }}</strong><label class="audience-control"><svg><use href="#i-users"/></svg><span class="sr-only">Đối tượng</span><select name="audience" aria-label="Đối tượng"><option value="ONLY_ME">Chỉ mình tôi</option><option value="FRIENDS">Bạn bè</option><option value="PUBLIC">Mọi người</option></select><svg><use href="#i-chevron-down"/></svg></label></span>
+    </div>
+    <label for="thread-content" class="sr-only">Nội dung bài viết</label>
+    <textarea id="thread-content" name="content" required maxlength="2000" rows="7" placeholder="Chia sẻ điều gì đó với mọi người..."></textarea>
+    <label class="create-upload">
+      <svg><use href="#i-image"/></svg>
+      <strong>Thêm ảnh hoặc video</strong>
+      <small>Kéo thả tệp vào đây hoặc chọn từ máy · tối đa 25 MB</small>
+      <span class="btn btn-outline">Chọn tệp</span>
+      <input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm">
+    </label>
+    <div class="create-option"><span><svg><use href="#i-message"/></svg>Bạn bè có thể trả lời</span><output id="thread-count" for="thread-content">0/2000</output></div>
+    <footer><button class="create-submit" type="submit" disabled><svg><use href="#i-send"/></svg>Đăng bài</button></footer>
+  </form>
+  <div class="create-tip"><svg><use href="#i-sparkles"/></svg><span><strong>Mẹo để bắt đầu cuộc trò chuyện</strong><small>Đặt câu hỏi, chia sẻ góc nhìn hoặc kể về điều bạn vừa khám phá.</small></span></div>
+</section>
+{% include "_right_rail.html" %}
+<script>
+(function(){
+  var input=document.getElementById('thread-content');
+  var count=document.getElementById('thread-count');
+  var submit=document.querySelector('.create-submit');
+  if(!input||!count||!submit) return;
+  function update(){var length=input.value.length;count.textContent=length+'/2000';submit.disabled=!input.value.trim();}
+  input.addEventListener('input',update);update();
+})();
+</script>
+{% endblock %}

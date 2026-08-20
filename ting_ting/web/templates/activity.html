@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Hoạt động — Nodi{% endblock %}
+{% block container_class %}app-shell{% endblock %}
+{% block content %}
+<section class="feed-column nodi-page-column">
+  <header class="nodi-page-header"><div><small>CẬP NHẬT</small><h1>Hoạt động</h1>{% if unread_count and unread_count > 0 %}<span class="activity-unread-count">{{ unread_count }} chưa đọc</span>{% endif %}</div>{% if unread_count and unread_count > 0 %}<form action="/web/activity/read-all" method="post"><button type="submit" class="activity-read-all">Đánh dấu tất cả đã đọc</button></form>{% endif %}</header>
+  <nav class="activity-filters" aria-label="Lọc hoạt động">
+    <a href="/web/activity" {% if not activity_kind %}class="active" aria-current="page"{% endif %}>Tất cả</a>
+    <a href="/web/activity?kind=like" {% if activity_kind == 'like' %}class="active" aria-current="page"{% endif %}>Lượt thích</a>
+    <a href="/web/activity?kind=comment" {% if activity_kind == 'comment' %}class="active" aria-current="page"{% endif %}>Bình luận</a>
+    <a href="/web/activity?kind=follow" {% if activity_kind == 'follow' %}class="active" aria-current="page"{% endif %}>Theo dõi</a>
+  </nav>
+  <section class="activity-notices">
+    {% if activities %}<h2>GẦN ĐÂY</h2>{% endif %}
+    {% for item in activities %}
+    <article class="activity-notice{% if not item.is_read %} unread{% endif %}">
+      <a class="notice-avatar" href="/web/profile/{{ item.actor.username }}">
+        <span class="avatar avatar-md">{% if item.actor.avatar %}<img src="{{ item.actor.avatar }}" alt="">{% else %}{{ (item.actor.display_name or item.actor.username)[0]|upper }}{% endif %}</span>
+        <i class="notice-kind notice-kind-{{ item.kind }}"><svg><use href="{% if item.kind == 'follow' %}#i-user-plus{% elif item.kind == 'like' %}#i-heart{% elif item.kind == 'comment' %}#i-message{% else %}#i-repeat{% endif %}"/></svg></i>
+      </a>
+      <a class="notice-copy" href="{% if item.post_id %}/web/feed#post-{{ item.post_id }}{% else %}/web/profile/{{ item.actor.username }}{% endif %}"><span><strong>{{ item.actor.display_name or item.actor.username }}</strong>{% if item.kind == 'follow' %} đã bắt đầu theo dõi bạn.{% elif item.kind == 'like' %} đã thích bài viết của bạn.{% elif item.kind == 'comment' %} đã bình luận bài viết của bạn.{% else %} đã đăng lại bài viết của bạn.{% endif %}</span><time>{{ item.created_at.strftime('%d/%m · %H:%M') }}</time></a>
+      {% if item.kind == 'follow' and not item.actor_followed %}<form action="/web/social/follow" method="post"><input type="hidden" name="target_username" value="{{ item.actor.username }}"><input type="hidden" name="next" value="/web/activity"><button class="activity-follow">Theo dõi lại</button></form>{% else %}<a class="activity-more" href="/web/profile/{{ item.actor.username }}" aria-label="Xem trang cá nhân của {{ item.actor.username }}"><svg><use href="#i-more"/></svg></a>{% endif %}
+      {% if not item.is_read %}<form action="/web/activity/{{ item.id }}/read" method="post" class="notice-read-form" title="Đánh dấu đã đọc"><button type="submit" class="notice-read-btn">Đã đọc</button></form>{% endif %}
+    </article>
+    {% else %}<p class="empty-state">Chưa có hoạt động phù hợp.</p>{% endfor %}
+  </section>
+</section>
+{% include "_right_rail.html" %}
+{% endblock %}

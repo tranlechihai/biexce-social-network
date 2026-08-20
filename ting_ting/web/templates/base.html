@@ -1,0 +1,124 @@
+{#- Base layout — included by every page -#}
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token or '' }}">
+    <title>{% block title %}Biexce{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1">
+    <script>document.documentElement.dataset.theme=localStorage.getItem('ting-theme')||'dark';</script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css?v=nodi-13">
+</head>
+<body class="{% if username %}is-authenticated{% else %}is-guest{% endif %}">
+    <svg class="icon-sprite" aria-hidden="true">
+        <symbol id="i-home" viewBox="0 0 24 24"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+        <symbol id="i-pen" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></symbol>
+        <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+        <symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></symbol>
+        <symbol id="i-user" viewBox="0 0 24 24"><path d="M18 20a6 6 0 0 0-12 0"/><circle cx="12" cy="10" r="4"/><circle cx="12" cy="12" r="10"/></symbol>
+        <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9"/></symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-2.93 1.41-1.41M17.66 6.34l1.41-1.41M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41"/></symbol>
+        <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></symbol>
+        <symbol id="i-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></symbol>
+        <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></symbol>
+        <symbol id="i-message" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+        <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m2 9 3-3 3 3"/><path d="M13 18H7a2 2 0 0 1-2-2V6"/><path d="m22 15-3 3-3-3"/><path d="M11 6h6a2 2 0 0 1 2 2v10"/></symbol>
+        <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></symbol>
+        <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+        <symbol id="i-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+        <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+        <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
+        <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4M22 5h-4M4 17v2M5 18H3"/></symbol>
+        <symbol id="i-user-plus" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/></symbol>
+    </svg>
+    <nav class="nav">
+        <a href="/web/feed" class="nav-brand" aria-label="Nodi"><img class="brand-logo-full" src="/static/nodi-logo-dark.svg" alt="Nodi"><img class="brand-logo-icon" src="/static/favicon.svg" alt=""></a>
+        {% if username %}
+        <ul class="nav-links nav-main">
+            <li><a href="/web/feed" aria-label="Dành cho bạn" class="{% if active == 'feed' %}active{% endif %}" {% if active == 'feed' %}aria-current="page"{% endif %}><svg><use href="#i-home"/></svg><span>Dành cho bạn</span></a></li>
+            <li><a href="/web/thread/new" aria-label="Viết bài" class="{% if active == 'create' %}active{% endif %}" {% if active == 'create' %}aria-current="page"{% endif %}><svg><use href="#i-pen"/></svg><span>Viết bài</span></a></li>
+            <li><a href="/web/people" aria-label="Tìm kiếm" class="{% if active == 'people' %}active{% endif %}" {% if active == 'people' %}aria-current="page"{% endif %}><svg><use href="#i-search"/></svg><span>Tìm kiếm</span></a></li>
+            <li><a href="/web/activity" aria-label="Hoạt động" class="{% if active == 'activity' %}active{% endif %}" {% if active == 'activity' %}aria-current="page"{% endif %}><svg><use href="#i-bell"/></svg><span>Hoạt động</span>{% set unread = request.state.unread_notifications | default(0) %}{% if unread and unread > 0 %}<span class="nav-badge" aria-hidden="true">{{ unread if unread <= 99 else '99+' }}</span><span class="sr-only">{{ unread }} hoạt động chưa đọc</span>{% endif %}</a></li>
+            <li><a href="/web/profile/me" aria-label="Trang cá nhân" class="{% if active == 'profile' %}active{% endif %}" {% if active == 'profile' %}aria-current="page"{% endif %}><svg><use href="#i-user"/></svg><span>Trang cá nhân</span></a></li>
+            <li><a href="/web/saved" aria-label="Đã lưu" class="{% if active == 'saved' %}active{% endif %}" {% if active == 'saved' %}aria-current="page"{% endif %}><svg><use href="#i-bookmark"/></svg><span>Đã lưu</span></a></li>
+            {% if request.state.user_is_moderator | default(false) %}
+            <li><a href="/web/mod/reports" aria-label="Báo cáo" class="{% if active == 'reports' %}active{% endif %}" {% if active == 'reports' %}aria-current="page"{% endif %}><svg><use href="#i-flag"/></svg><span>Báo cáo</span>{% set pr = request.state.pending_reports | default(0) %}{% if pr and pr > 0 %}<span class="nav-badge" aria-hidden="true">{{ pr if pr <= 99 else '99+' }}</span><span class="sr-only">{{ pr }} báo cáo đang chờ</span>{% endif %}</a></li>
+            {% endif %}
+        </ul>
+        <div class="nav-bottom">
+            <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Đổi giao diện sáng tối" aria-pressed="false"><svg class="theme-icon theme-icon-moon"><use href="#i-moon"/></svg><svg class="theme-icon theme-icon-sun"><use href="#i-sun"/></svg><span>Giao diện</span></button>
+            <a class="nav-account" href="/web/profile/me"><span class="avatar avatar-sm">{{ username[0]|upper }}</span><span><strong>{{ username }}</strong><small>@{{ username }}</small></span><svg class="account-more"><use href="#i-more"/></svg></a>
+            <form action="/web/logout" method="post"><button type="submit" class="btn-logout" aria-label="Đăng xuất"><svg><use href="#i-logout"/></svg><span>Đăng xuất</span></button></form>
+        </div>
+        {% else %}
+        <ul class="nav-links guest-nav">
+            <li><a href="/web/login" class="{% if active == 'login' %}active{% endif %}" {% if active == 'login' %}aria-current="page"{% endif %}>Đăng nhập</a></li>
+            <li><a href="/web/register" class="{% if active == 'register' %}active{% endif %}" {% if active == 'register' %}aria-current="page"{% endif %}>Đăng ký</a></li>
+        </ul>
+        {% endif %}
+    </nav>
+
+    <main class="container {% block container_class %}{% endblock %}">
+        {% with messages = errors or [] %}
+        {% if messages %}
+        <div class="alert alert-error" role="alert">
+            <ul>
+            {% for msg in messages %}
+                <li>{{ msg }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <p>© 2026 Biexce Social</p>
+    </footer>
+
+    <script>
+    (function(){
+      var button=document.getElementById('theme-toggle');
+      if(!button) return;
+      function syncPressed(){button.setAttribute('aria-pressed',String(document.documentElement.dataset.theme==='light'));}
+      syncPressed();
+      button.addEventListener('click',function(){
+        var next=document.documentElement.dataset.theme==='dark'?'light':'dark';
+        document.documentElement.dataset.theme=next;
+        localStorage.setItem('ting-theme',next);
+        syncPressed();
+      });
+    })();
+    document.querySelectorAll('form[method="post"],form[method="POST"]').forEach(function(form){
+      if(form.querySelector('input[name="csrf_token"]')) return;
+      var input=document.createElement('input');
+      input.type='hidden'; input.name='csrf_token';
+      input.value=document.querySelector('meta[name="csrf-token"]').content;
+      form.appendChild(input);
+    });
+    // Auto-submit forms triggered by buttons
+    document.querySelectorAll('form[data-auto]').forEach(function(form) {
+        form.querySelector('input[type="hidden"]') && form.submit();
+    });
+
+    // Show edit form
+    document.querySelectorAll('[data-toggle-post-edit]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var postId = this.dataset.postId;
+            var form = document.getElementById('edit-form-' + postId);
+            if (form) form.classList.toggle('hidden');
+        });
+    });
+    </script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.lock
+      - run: ruff check ting_ting tests
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          pip install -r requirements.lock
+          pip install -r requirements-dev.lock
+          pip install --no-deps -e .
+      - run: pytest -q
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.lock
+      - name: Audit prod lockfile
+        # --disable-pip --no-deps: audit the pins exactly as locked (no re-resolve).
+        # Waived: PYSEC-2026-1325 (CVE-2024-23342, python-ecdsa Minerva timing
+        # attack, no upstream fix; unreachable - app uses HS256 JWT only).
+        run: pip-audit -r requirements.lock --disable-pip --no-deps --ignore-vuln PYSEC-2026-1325
+      - name: Audit dev lockfile
+        # Waived: PYSEC-2026-1845 (CVE-2025-71176, pytest tmpdir handling, local
+        # attack vector, dev/CI-only tool; fix requires pytest 9.x which violates
+        # the pinned constraint >=7.4,<9.0 - upgrade tracked separately).
+        run: pip-audit -r requirements-dev.lock --disable-pip --no-deps --ignore-vuln PYSEC-2026-1845

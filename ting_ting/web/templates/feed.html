@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Dành cho bạn — Biexce{% endblock %}
+{% block container_class %}app-shell{% endblock %}
+{% block content %}
+<section class="feed-column">
+  <div class="feed-tabs"><a class="feed-tab {% if feed_view != 'following' %}active{% endif %}" {% if feed_view != 'following' %}aria-current="page"{% endif %} href="/web/feed">Dành cho bạn</a><a class="feed-tab {% if feed_view == 'following' %}active{% endif %}" {% if feed_view == 'following' %}aria-current="page"{% endif %} href="/web/feed?view=following">Đang theo dõi</a></div>
+
+  {% if request.query_params.get('reported') == '1' %}<div class="alert alert-success" role="status">Báo cáo của bạn đã được gửi. Đội ngũ điều phối viên sẽ xem xét.</div>{% endif %}
+
+  <div class="composer" id="composer">
+    <div class="composer-avatar">{{ username[0]|upper }}</div>
+    <form class="composer-body form" action="/web/posts/create" method="post" enctype="multipart/form-data" data-upload-form>
+      <label for="post-content" class="sr-only">Nội dung bài viết</label>
+      <textarea id="post-content" name="content" required maxlength="2000" rows="2" placeholder="Bạn đang nghĩ gì?"></textarea>
+      <div id="composer-preview" class="composer-preview" hidden></div>
+      <div id="composer-upload-state" class="composer-upload-state" role="status" aria-live="polite"></div>
+      <div class="composer-tools">
+        <label class="media-picker" title="Thêm ảnh hoặc video"><svg><use href="#i-image"/></svg><span>Ảnh/video</span><input type="file" name="media_file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm"></label>
+        <select name="audience" class="audience-select" aria-label="Đối tượng"><option value="ONLY_ME">Chỉ mình tôi</option><option value="FRIENDS">Bạn bè</option><option value="PUBLIC">Mọi người</option></select>
+        <span class="muted media-hint">Ảnh/video · 25 MB</span>
+        <button type="submit" class="btn btn-primary">Đăng</button>
+      </div>
+    </form>
+  </div>
+
+  {% for post in posts %}
+  <article id="post-{{ post.id }}" class="thread-item{% if not post.is_own %} thread-other{% endif %}">
+    <div class="thread-avatar">{% if post.author_avatar %}<img src="{{ post.author_avatar }}" alt="">{% else %}{{ post.author_name[0]|upper }}{% endif %}</div>
+    <div class="thread-main">
+      <header class="thread-header">
+        <strong>{{ post.author_name }}</strong>
+        <span class="thread-handle">@{{ post.author_username }}</span>
+        <span class="thread-audience">{% if post.audience == 'ONLY_ME' %}Chỉ mình tôi{% elif post.audience == 'PUBLIC' %}Mọi người{% else %}Bạn bè{% endif %}</span>
+        <time>{{ post.created_at_str }}</time>
+        {% if post.is_own %}<button class="thread-menu" data-toggle-post-edit data-post-id="{{ post.id }}" aria-label="Chỉnh sửa bài viết"><svg><use href="#i-more"/></svg></button>{% endif %}
+      </header>
+      <div class="thread-content">{{ post.content }}</div>
+      {% if post.media %}<div class="post-media">{% for media in post.media %}{% set media_path = media.path if media is mapping else media %}{% set media_type = media.type if media is mapping else 'image' %}{% if media_type == 'video' %}<video src="{{ media_path }}" controls preload="metadata"></video>{% else %}<img src="{{ media_path }}" alt="Ảnh bài viết" loading="lazy">{% endif %}{% endfor %}</div>{% endif %}
+
+      {% if post.is_own %}<div id="edit-form-{{ post.id }}" class="hidden thread-edit"><form class="form" action="/web/posts/{{ post.id }}/edit" method="post"><textarea name="content" required maxlength="2000" rows="3">{{ post.content }}</textarea><select name="audience"><option value="ONLY_ME" {% if post.audience == 'ONLY_ME' %}selected{% endif %}>Chỉ mình tôi</option><option value="FRIENDS" {% if post.audience == 'FRIENDS' %}selected{% endif %}>Bạn bè</option><option value="PUBLIC" {% if post.audience == 'PUBLIC' %}selected{% endif %}>Mọi người</option></select><div class="button-row"><button class="btn btn-primary">Lưu</button><button class="btn btn-danger" formaction="/web/posts/{{ post.id }}/delete" onclick="return confirm('Xóa bài viết này và toàn bộ phản hồi? Hành động không thể hoàn tác.');">Xóa</button></div></form></div>{% endif %}
+
+      <div class="thread-actions">
+        {% if post.liked_by_viewer %}<form action="/web/posts/{{ post.id }}/unlike" method="post"><button class="action-btn active" aria-label="Bỏ thích"><svg><use href="#i-heart"/></svg><span>{{ post.like_count }}</span></button></form>{% else %}<form action="/web/posts/{{ post.id }}/like" method="post"><button class="action-btn" aria-label="Thích"><svg><use href="#i-heart"/></svg><span>{{ post.like_count }}</span></button></form>{% endif %}
+        <button class="action-btn" data-toggle-comment data-post-id="{{ post.id }}" aria-label="Bình luận ({{ post.comment_count }})"><svg><use href="#i-message"/></svg><span>{{ post.comment_count }}</span></button>
+        <form action="/web/posts/{{ post.id }}/repost" method="post"><button class="action-btn {% if post.reposted_by_viewer %}active{% endif %}" aria-label="Đăng lại"><svg><use href="#i-repeat"/></svg><span>{{ post.repost_count }}</span></button></form>
+        <span class="action-spacer"></span>
+        <form action="/web/posts/{{ post.id }}/save" method="post"><button class="action-btn {% if post.saved_by_viewer %}active{% endif %}" aria-label="Lưu bài viết"><svg><use href="#i-bookmark"/></svg></button></form>
+        <form action="/web/posts/{{ post.id }}/hide" method="post"><button class="action-btn" aria-label="Che giấu khỏi feed" title="Che giấu khỏi feed">Ẩn</button></form>
+        <details class="report-menu"><summary class="action-btn" aria-label="Báo cáo bài viết" title="Báo cáo bài viết"><svg><use href="#i-flag"/></svg></summary><form action="/web/posts/{{ post.id }}/report" method="post"><label class="sr-only" for="report-reason-{{ post.id }}">Lý do báo cáo</label><select name="reason" id="report-reason-{{ post.id }}"><option value="spam">Spam / quảng cáo</option><option value="harassment">Quấy rối / khiêu khích</option><option value="hate_speech">Ngôn từ thù ghét</option><option value="false_info">Thông tin sai sự thật</option><option value="other">Khác</option></select><button class="btn btn-danger">Gửi báo cáo</button></form></details>
+        <button type="button" class="action-btn" aria-label="Chia sẻ"><svg><use href="#i-share"/></svg></button>
+      </div>
+
+      {% if post.comments %}<div class="thread-comments hidden" data-comment-section="{{ post.id }}">{% for comment in post.comments %}<div class="thread-comment{% if comment.is_reply %} comment-reply{% endif %}">{% if comment.is_reply %}<span class="comment-reply-label">↩ {{ comment.reply_to }} ·</span>{% endif %}<strong>{{ comment.author_name }}</strong><span>{{ comment.content }}</span>{% if comment.can_edit %}<details class="comment-edit"><summary>Sửa</summary><form action="/web/posts/{{ post.id }}/comments/{{ comment.id }}/edit" method="post"><input name="content" required maxlength="1000" value="{{ comment.content }}"><button class="btn btn-primary">Lưu</button></form></details>{% endif %}{% if comment.can_delete %}<form action="/web/posts/{{ post.id }}/comments/{{ comment.id }}/delete" method="post" onsubmit="return confirm('Xóa bình luận này?');"><button class="text-danger" aria-label="Xóa bình luận này">Xóa</button></form>{% endif %}<details class="report-menu comment-report"><summary aria-label="Báo cáo bình luận">⚑</summary><form action="/web/posts/{{ post.id }}/report" method="post"><input type="hidden" name="comment_id" value="{{ comment.id }}"><select name="reason" aria-label="Lý do báo cáo"><option value="spam">Spam / quảng cáo</option><option value="harassment">Quấy rối / khiêu khích</option><option value="hate_speech">Ngôn từ thù ghét</option><option value="false_info">Thông tin sai sự thật</option><option value="other">Khác</option></select><button class="btn btn-danger">Báo cáo</button></form></details>{% if not comment.is_reply %}<details class="comment-reply-form"><summary>Trả lời</summary><form action="/web/posts/{{ post.id }}/comment" method="post"><input type="hidden" name="parent_comment_id" value="{{ comment.id }}"><input name="content" required maxlength="1000" placeholder="Trả lời {{ comment.author_name }}..."><button class="btn btn-primary">Gửi</button></form></details>{% endif %}</div>{% endfor %}</div>{% endif %}
+      <div class="hidden comment-composer" data-comment-form="{{ post.id }}"><form action="/web/posts/{{ post.id }}/comment" method="post"><input name="content" required maxlength="1000" placeholder="Trả lời bài viết..."><button class="btn btn-primary">Trả lời</button></form></div>
+    </div>
+  </article>
+  {% else %}<div class="empty-state">{% if feed_view == 'following' %}Chưa có bài viết từ những người bạn theo dõi.{% else %}Chưa có bài viết. Hãy tạo bài viết mới hoặc kết bạn để xem bài viết của họ.{% endif %}</div>{% endfor %}
+</section>
+
+{% include "_right_rail.html" %}
+
+<script>document.querySelectorAll('[data-toggle-comment]').forEach(function(btn){btn.addEventListener('click',function(){var id=this.dataset.postId;var section=document.querySelector('[data-comment-section="'+id+'"]');var form=document.querySelector('[data-comment-form="'+id+'"]');var open;if(section){section.classList.toggle('hidden');open=!section.classList.contains('hidden');}else{open=true;}if(form){form.classList.toggle('hidden',!open);if(open)form.querySelector('input').focus();}});});</script>
+<script>(function(){
+  var form=document.querySelector('form[data-upload-form]');
+  if(!form) return;
+  var fileInput=form.querySelector('input[name="media_file"]');
+  var preview=document.getElementById('composer-preview');
+  var state=document.getElementById('composer-upload-state');
+  if(!fileInput||!preview||!state) return;
+  fileInput.addEventListener('change',function(){
+    preview.innerHTML='';
+    var f=fileInput.files[0];
+    if(!f) return;
+    if(f.size>25*1024*1024){
+      state.textContent='File vượt quá 25 MB — hãy chọn file nhỏ hơn.';
+      state.className='composer-upload-state error';
+      return;
+    }
+    state.textContent='';
+    state.className='composer-upload-state';
+    var url=URL.createObjectURL(f);
+    var el=f.type.indexOf('video')===0?document.createElement('video'):document.createElement('img');
+    if(el.tagName==='VIDEO') el.controls=true;
+    el.src=url; el.className='composer-preview-media'; el.alt='Xem trước '+(f.name||'media');
+    var remove=document.createElement('button');
+    remove.type='button'; remove.className='composer-preview-remove';
+    remove.setAttribute('aria-label','Gỡ ảnh/video'); remove.textContent='×';
+    remove.addEventListener('click',function(){URL.revokeObjectURL(url);fileInput.value='';preview.hidden=true;});
+    preview.appendChild(el); preview.appendChild(remove);
+    preview.hidden=false;
+  });
+  form.addEventListener('submit',function(e){
+    if(!fileInput.files.length) return;
+    e.preventDefault();
+    var xhr=new XMLHttpRequest();
+    state.textContent='Đang tải file lên… 0%';
+    state.className='composer-upload-state progress';
+    xhr.open('POST',form.action);
+    xhr.setRequestHeader('X-File-Upload','xhr');
+    xhr.upload.onprogress=function(ev){if(ev.lengthComputable){state.textContent='Đang tải file lên… '+Math.round(ev.loaded/ev.total*100)+'%';}};
+    xhr.onload=function(){
+      if(xhr.status>=200&&xhr.status<400){
+        window.location=(((xhr.getResponseHeader('Location'))||'/web/feed').split('#')[0]);
+        return;
+      }
+      var msg='Đăng bài thất bại. Vui lòng thử lại.';
+      try{var body=JSON.parse(xhr.responseText);if(body&&body.error&&body.error.message)msg=body.error.message;}catch(e){}
+      state.textContent=msg;
+      state.className='composer-upload-state error';
+    };
+    xhr.onerror=function(){
+      state.textContent='Lỗi mạng khi tải file. Vui lòng thử lại.';
+      state.className='composer-upload-state error';
+    };
+    xhr.send(new FormData(form));
+  });
+})();
+</script>
+{% endblock %}

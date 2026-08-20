@@ -1,0 +1,24 @@
+[Unit]
+Description=Biexce Social FastAPI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chihai
+Group=chihai
+WorkingDirectory=/home/chihai/workspace/biexce-social-backend-slim
+EnvironmentFile=/etc/biexce-social.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/chihai/workspace/biexce-social-backend-slim/.venv/bin/python -m uvicorn ting_ting.main:app --host 127.0.0.1 --port 8080 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/chihai/workspace/biexce-social-backend-slim/uploads
+
+[Install]
+WantedBy=multi-user.target

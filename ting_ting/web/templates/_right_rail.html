@@ -1,0 +1,13 @@
+<aside class="right-rail">
+  <form class="rail-search" action="/web/people" method="get" role="search"><svg><use href="#i-search"/></svg><input name="q" aria-label="Tìm kiếm trên Nodi" placeholder="Tìm kiếm trên Nodi"><kbd>⌘ K</kbd></form>
+  <section class="rail-card">
+    <header><h2>Đang nổi bật</h2><a href="/web/people">Xem tất cả</a></header>
+    <a class="trend" href="/web/people"><span><small>Cộng đồng</small><strong>Tìm người mới</strong><em>Kết nối qua bạn bè và theo dõi</em></span><svg><use href="#i-more"/></svg></a>
+    <a class="trend" href="/web/activity"><span><small>Cập nhật</small><strong>Hoạt động gần đây</strong><em>Thích, bình luận và theo dõi</em></span><svg><use href="#i-more"/></svg></a>
+  </section>
+  <section class="rail-card">
+    <header><h2>Gợi ý cho bạn</h2><a href="/web/people">Xem tất cả</a></header>
+    {% for person in suggestions or [] %}<div class="rail-person"><a href="/web/profile/{{ person.username }}" class="person-main"><span class="avatar avatar-sm">{% if person.avatar %}<img src="{{ person.avatar }}" alt="">{% else %}{{ (person.display_name or person.username)[0]|upper }}{% endif %}</span><span><strong>{{ person.display_name or person.username }}</strong><small>@{{ person.username }}</small></span></a>{% if not person.followed %}<form action="/web/social/follow" method="post"><input type="hidden" name="target_username" value="{{ person.username }}"><button class="follow-btn">Theo dõi</button></form>{% endif %}</div>{% else %}<p class="rail-empty">Chưa có gợi ý.</p>{% endfor %}
+  </section>
+  <footer>Giới thiệu · Trợ giúp · Quyền riêng tư · Điều khoản<br>© 2026 Nodi</footer>
+</aside>

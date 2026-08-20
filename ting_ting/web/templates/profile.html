@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{{ user.username }} — Biexce{% endblock %}
+{% block content %}
+<div class="profile-hero card">
+    <div class="profile-copy"><span class="eyebrow">Trang cá nhân</span><h1>{{ user.display_name or user.username }}</h1><p class="handle">@{{ user.username }}</p>{% if following_count is not none %}<p class="profile-stats"><span><strong>{{ following_count }}</strong> Đang theo dõi</span><span class="profile-stats-sep" aria-hidden="true">·</span><span><strong>{{ followers_count }}</strong> Người theo dõi</span></p>{% endif %}<p class="profile-bio">{{ user.bio or 'Chưa có tiểu sử.' }}</p>{% if user.location or user.occupation %}<p class="profile-meta">{% if user.occupation %}{{ user.occupation }}{% endif %}{% if user.occupation and user.location %} · {% endif %}{% if user.location %}{{ user.location }}{% endif %}</p>{% endif %}{% if user.website %}<a class="profile-website" href="{{ user.website }}" rel="noopener noreferrer">{{ user.website }}</a>{% endif %}</div>
+    {% if is_own %}<form class="avatar-frame" action="/web/avatar/upload" method="post" enctype="multipart/form-data"><label for="avatar_quick" class="avatar-upload-trigger" title="Đổi ảnh đại diện"><div class="avatar avatar-xl">{% if user.avatar %}<img src="{{ user.avatar }}" alt="Ảnh đại diện của {{ user.username }}">{% else %}{{ (user.display_name or user.username)[0]|upper }}{% endif %}</div><span class="avatar-upload-overlay" aria-hidden="true"><svg><use href="#i-camera"/></svg></span><input class="avatar-upload-input" type="file" id="avatar_quick" name="avatar_file" accept="image/jpeg,image/png,image/webp" aria-label="Đổi ảnh đại diện"></label><small class="avatar-upload-hint">Nhấn vào ảnh để đổi avatar</small></form><script>var _quick=document.getElementById('avatar_quick');if(_quick){_quick.addEventListener('change',function(){if(this.files.length)this.form.requestSubmit();});}</script>{% else %}<div class="avatar-frame"><div class="avatar avatar-xl">{% if user.avatar %}<img src="{{ user.avatar }}" alt="Ảnh đại diện của {{ user.username }}">{% else %}{{ (user.display_name or user.username)[0]|upper }}{% endif %}</div></div>{% endif %}
+</div>
+
+{# Own profile: edit form + social controls #}
+{% if is_own %}
+{% if password_changed %}<div class="alert alert-success" role="status">Đổi mật khẩu thành công.</div>{% endif %}
+<details class="edit-profile-panel" {% if password_panel_open %}open{% endif %}><summary>Chỉnh sửa trang cá nhân</summary>
+<form class="form" action="/web/profile/update" method="post" enctype="multipart/form-data">
+    <div class="form-grid">
+    <div class="form-group">
+        <label for="display_name">Tên hiển thị</label>
+        <input type="text" id="display_name" name="display_name" maxlength="60"
+               value="{{ user.display_name or '' }}" placeholder="Tên của bạn">
+    </div>
+    <div class="form-group"><label for="occupation">Nghề nghiệp</label><input id="occupation" name="occupation" maxlength="100" value="{{ user.occupation or '' }}"></div>
+    <div class="form-group"><label for="location">Địa điểm</label><input id="location" name="location" maxlength="100" value="{{ user.location or '' }}"></div>
+    <div class="form-group"><label for="birthday">Ngày sinh</label><input type="date" id="birthday" name="birthday" value="{{ user.birthday or '' }}"></div>
+    <div class="form-group"><label for="gender">Giới tính</label><select id="gender" name="gender"><option value="">Không hiển thị</option>{% for value,label in [('female','Nữ'),('male','Nam'),('prefer_not_to_say','Không muốn trả lời')] %}<option value="{{ value }}" {% if user.gender == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+    <div class="form-group"><label for="website">Website</label><input type="url" id="website" name="website" maxlength="300" value="{{ user.website or '' }}" placeholder="https://"></div>
+    </div>
+    <div class="form-group">
+        <label for="bio">Tiểu sử</label>
+        <textarea id="bio" name="bio" maxlength="300" rows="3"
+                  placeholder="Tell us about yourself">{{ user.bio or '' }}</textarea>
+    </div>
+    <button type="submit" class="btn btn-primary">Lưu thay đổi</button>
+</form>
+<div class="settings-divider"></div>
+<form class="form" action="/web/profile/password" method="post">
+    <h2>Đổi mật khẩu</h2>
+    <div class="form-group"><label for="current_password">Mật khẩu hiện tại</label><input type="password" id="current_password" name="current_password" required autocomplete="current-password"></div>
+    <div class="form-grid">
+        <div class="form-group"><label for="new_password">Mật khẩu mới</label><input type="password" id="new_password" name="new_password" required minlength="8" autocomplete="new-password"></div>
+        <div class="form-group"><label for="confirm_password">Xác nhận mật khẩu mới</label><input type="password" id="confirm_password" name="confirm_password" required minlength="8" autocomplete="new-password"></div>
+    </div>
+    <button type="submit" class="btn btn-primary">Đổi mật khẩu</button>
+    <p class="session-hint">Đổi mật khẩu sẽ kết thúc các phiên đăng nhập khác trên mọi thiết bị.</p>
+</form>
+<div class="settings-divider"></div>
+<form class="form" action="/web/profile/logout-all" method="post">
+    <h2>Thiết bị đã đăng nhập</h2>
+    <p class="session-hint">Kết thúc phiên hiện tại và mọi phiên khác của tài khoản này.</p>
+    <button type="submit" class="btn btn-secondary">Đăng xuất khỏi mọi thiết bị</button>
+</form>
+</details>
+{% endif %}
+
+{# Other user profile: relationship actions #}
+{% if not is_own %}
+<div class="card social-actions">
+    <h2>Kết nối</h2>
+    {% if relationship not in ('blocked_by_me', 'blocked_by_them') %}
+    {% if following %}<form class="form-inline" action="/web/social/unfollow" method="post"><input type="hidden" name="target_username" value="{{ user.username }}"><input type="hidden" name="next" value="/web/profile/{{ user.username }}"><button type="submit" class="btn btn-outline">Đang theo dõi</button></form>{% else %}<form class="form-inline" action="/web/social/follow" method="post"><input type="hidden" name="target_username" value="{{ user.username }}"><input type="hidden" name="next" value="/web/profile/{{ user.username }}"><button type="submit" class="btn btn-primary">Theo dõi</button></form>{% endif %}
+    {% endif %}
+    {% if relationship not in ('blocked_by_me', 'blocked_by_them') %}
+    <form class="form-inline" action="/web/social/mute" method="post">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <input type="hidden" name="next" value="/web/profile/{{ user.username }}">
+        <button type="submit" class="btn btn-secondary {% if muted %}active{% endif %}">{% if muted %}Đang giấu{% else %}Giấu người dùng{% endif %}</button>
+    </form>
+    {% endif %}
+    {% if relationship == 'none' %}
+    <form class="form-inline" action="/web/social/friend-request" method="post">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <button type="submit" class="btn btn-primary">Gửi lời mời kết bạn</button>
+    </form>
+    <form class="form-inline" action="/web/social/block" method="post" onsubmit="return confirm('Chặn {{ user.username }}? Người dùng này sẽ không thể tương tác với bạn nữa.');">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <button type="submit" class="btn btn-secondary">Chặn người dùng</button>
+    </form>
+    {% elif relationship == 'friends' %}
+    <form class="form-inline" action="/web/social/unfriend" method="post" onsubmit="return confirm('Ngừng là bạn với {{ user.username }}?');">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <button type="submit" class="btn btn-secondary">Hủy kết bạn</button>
+    </form>
+    <form class="form-inline" action="/web/social/block" method="post" onsubmit="return confirm('Chặn {{ user.username }}? Người dùng này sẽ không thể tương tác với bạn nữa.');">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <button type="submit" class="btn btn-secondary">Chặn người dùng</button>
+    </form>
+    {% elif relationship == 'pending_outgoing' %}
+    <p>Đã gửi lời mời kết bạn, đang chờ đối phương phản hồi.</p>
+    {% if outgoing_request_id %}
+    <form class="form-inline" action="/web/social/cancel-request" method="post">
+        <input type="hidden" name="request_id" value="{{ outgoing_request_id }}">
+        <button type="submit" class="btn btn-secondary">Hủy lời mời</button>
+    </form>
+    {% endif %}
+    {% elif relationship == 'pending_incoming' %}
+    <p>Người dùng này đã gửi cho bạn lời mời kết bạn.</p>
+    {% elif relationship == 'blocked_by_me' %}
+    <p>Bạn đã chặn người dùng này.</p>
+    <form class="form-inline" action="/web/social/unblock" method="post">
+        <input type="hidden" name="target_username" value="{{ user.username }}">
+        <button type="submit" class="btn btn-secondary">Mở chặn</button>
+    </form>
+    {% elif relationship == 'blocked_by_them' %}
+    <p>Người dùng này đã chặn bạn.</p>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="profile-tabs"><button class="active">Bài viết</button><button disabled>Trả lời</button><button disabled>Đăng lại</button></div>
+<div class="profile-thread-list">{% for post in posts %}<article class="post profile-thread"><div class="post-header"><strong>{{ user.display_name or user.username }}</strong><span class="post-time">{{ post.created_at_str }}</span></div><div class="post-content">{{ post.content }}</div>{% if post.media %}<div class="post-media">{% for media in post.media %}{% set media_path = media.path if media is mapping else media %}{% set media_type = media.type if media is mapping else 'image' %}{% if media_type == 'video' %}<video src="{{ media_path }}" controls preload="metadata"></video>{% else %}<img src="{{ media_path }}" alt="Ảnh bài viết">{% endif %}{% endfor %}</div>{% endif %}<div class="post-actions"><span>♡ {{ post.like_count }}</span><span>◯ {{ post.comment_count }}</span><span>↻ {{ post.repost_count }}</span></div></article>{% else %}<p class="empty-state">Chưa có bài viết nào.</p>{% endfor %}</div>
+
+{% endblock %}

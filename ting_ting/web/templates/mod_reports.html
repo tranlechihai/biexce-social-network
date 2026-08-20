@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Báo cáo — Biexce{% endblock %}
+{% block content %}
+<div class="people-page">
+  <div class="page-heading"><div><h1>Hàng đợi báo cáo</h1><p class="muted">Nội dung và tài khoản được cộng đồng báo cáo. Hành động của bạn được ghi audit.</p></div></div>
+  <nav class="pill-tabs" aria-label="Lọc trạng thái">
+    <a class="pill {% if current_status == 'pending' %}active{% endif %}" {% if current_status == 'pending' %}aria-current="page"{% endif %} href="/web/mod/reports?status=pending">Đang xử lý</a>
+    <a class="pill {% if current_status == 'resolved' %}active{% endif %}" {% if current_status == 'resolved' %}aria-current="page"{% endif %} href="/web/mod/reports?status=resolved">Đã xử lý</a>
+    <a class="pill {% if current_status == 'dismissed' %}active{% endif %}" {% if current_status == 'dismissed' %}aria-current="page"{% endif %} href="/web/mod/reports?status=dismissed">Bỏ qua</a>
+  </nav>
+
+  <div class="people-list">{% for r in reports %}
+  <article class="person-list-row report-row">
+    <div class="report-main">
+      <strong>{% if r.comment_id %}Bình luận #{{ r.comment_id }}{% elif r.post_id %}Bài viết #{{ r.post_id }}{% else %}Tài khoản{% endif %}</strong> của <a href="/web/profile/{{ r.target }}">@{{ r.target }}</a>
+      <small class="person-bio">{{ r.reason_label }} · bởi @{{ r.reporter }} · {{ r.created_at_str }}</small>
+      {% if r.status != 'pending' %}
+      <small class="report-resolution">→ {{ 'Đã xử lý' if r.status == 'resolved' else 'Bỏ qua' }}{% if r.resolution_note %} — {{ r.resolution_note }}{% endif %} ({{ r.resolved_at_str }})</small>
+      {% endif %}
+    </div>
+    {% if r.status == 'pending' %}
+    <div class="button-row">
+      <form action="/web/mod/reports/{{ r.id }}/resolve" method="post"><label class="field-note" for="note-{{ r.id }}-resolve">Ghi chú</label><input type="text" id="note-{{ r.id }}-resolve" name="note" class="input-note" maxlength="500" placeholder="đã xóa/chặn…"><button class="btn btn-primary">Xử lý</button></form>
+      <form action="/web/mod/reports/{{ r.id }}/dismiss" method="post"><label class="field-note" for="note-{{ r.id }}-dismiss">Ghi chú</label><input type="text" id="note-{{ r.id }}-dismiss" name="note" class="input-note" maxlength="500" placeholder="không vi phạm…"><button class="btn btn-secondary">Bỏ qua</button></form>
+      <form action="/web/mod/users/{{ r.target_id }}/ban" method="post" data-confirm class="ban-form"><button class="btn btn-danger">Khóa tài khoản</button></form>
+    </div>
+    {% endif %}
+  </article>{% else %}
+  <p class="empty-state">Không có báo cáo nào ở trạng thái này.</p>
+  {% endfor %}</div>
+</div>
+{% endblock %}
