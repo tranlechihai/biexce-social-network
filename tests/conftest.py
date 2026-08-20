@@ -75,12 +75,26 @@ _test_engine = None
 
 
 class CsrfTestClient(TestClient):
-    """Make web test mutations behave like forms rendered by the application."""
+    """Model a correct browser client for CSRF.
+
+    * /web/ mutations: behave like rendered forms (fetch a CSRF cookie if
+      missing, then send the double-submit token).
+    * /api/ mutations: T-020 requires cookie-authenticated API calls to carry
+      the CSRF token too — a real client reads its own cookie and attaches the
+      header.  We only inject it when the CSRF cookie is already present (a
+      caller explicitly testing the 403 path gets no injection and no forced
+      login).
+    """
 
     def request(self, method, url, **kwargs):
-        if method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and str(url).startswith("/web/"):
-            if not self.cookies.get("ting_ting_csrf"):
-                super().request("GET", "/web/login")
+        if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return super().request(method, url, **kwargs)
+        path = str(url)
+        if path.startswith("/web/") and not self.cookies.get("ting_ting_csrf"):
+            super().request("GET", "/web/login")
+        if not self.cookies.get("ting_ting_csrf"):
+            return super().request(method, url, **kwargs)
+        if path.startswith("/web/") or path.startswith("/api/"):
             headers = dict(kwargs.pop("headers", {}) or {})
             headers.setdefault("X-CSRF-Token", self.cookies.get("ting_ting_csrf", ""))
             kwargs["headers"] = headers

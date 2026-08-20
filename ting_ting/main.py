@@ -20,7 +20,13 @@ from ting_ting import notifications as notification_service
 from ting_ting.errors import register_error_handlers
 from ting_ting.api import auth, profile, social, posts, interactions, extensions, notifications, users, moderation
 from ting_ting.media import router as media_router
-from ting_ting.security import CSRF_COOKIE_NAME, rate_limiter, request_rate_limit
+from ting_ting.security import (
+    CSRF_COOKIE_NAME,
+    api_cookie_csrf_violation,
+    normalize_api_path,
+    rate_limiter,
+    request_rate_limit,
+)
 from ting_ting.config import get_settings
 
 # Baseline CSP matched to the current Jinja2 templates (inline <script> and
@@ -211,12 +217,27 @@ async def _notification_badge(request: Request, call_next):
 
 @app.middleware("http")
 async def _security_controls(request: Request, call_next):
-    """Issue CSRF cookies and bound abuse-sensitive mutation rates."""
+    """Issue CSRF cookies, protect cookie-authed API mutations, and bound
+    abuse-sensitive mutation rates."""
     settings = get_settings()
+
+    # T-020: cookie-authenticated /api mutations require a valid CSRF token
+    # (Bearer requests are exempt — browsers cannot attach custom headers
+    # cross-site).  Must run before rate limiting so probes don't consume quota.
+    if api_cookie_csrf_violation(request):
+        from ting_ting.errors import error_response
+        return error_response(
+            "forbidden",
+            "A valid CSRF token is required for cookie-authenticated API requests.",
+            403,
+        )
+
     limit = request_rate_limit(request) if settings.rate_limit_enabled else None
     if limit is not None:
         client = request.client.host if request.client else "unknown"
-        key = f"{client}:{request.method}:{request.url.path}"
+        # Normalized identity so /api and /api/v1 share one quota bucket.
+        norm_path = normalize_api_path(request.url.path)
+        key = f"{client}:{request.method}:{norm_path}"
         if not rate_limiter.allow(key, limit=limit, window_seconds=60):
             from ting_ting.errors import error_response
             return error_response(
@@ -263,7 +284,8 @@ async def _request_id_and_metrics(request: Request, call_next):
     _metrics.observe_request(duration_ms / 1000.0)
     if (
         request.method == "POST"
-        and request.url.path == "/api/auth/login"
+        # Normalized identity: counts /api/auth/login and /api/v1/auth/login.
+        and normalize_api_path(request.url.path) == "/api/auth/login"
         and response.status_code >= 400
     ):
         _metrics.inc("auth_login_failures_total")

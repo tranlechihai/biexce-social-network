@@ -15,11 +15,15 @@ Codes map to predictable statuses:
 * ``not_found`` → 404
 """
 
+import logging
+
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_logger = logging.getLogger("ting_ting.errors")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +111,15 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _generic_exception_handler(request: Request, exc: Exception):
+        # T-020: log server errors with a correlation id (rid) so operators can
+        # trace the failure, but only the exception repr — never the request
+        # body or credentials.  The client still receives a generic envelope.
+        request_id = getattr(request.state, "request_id", None) or "-"
+        _logger.error(
+            "rid=%s unhandled exception on %s %s: %r",
+            request_id, request.method, request.url.path, exc,
+            exc_info=exc,
+        )
         return error_response(
             code="internal",
             message="An unexpected server error occurred.",
