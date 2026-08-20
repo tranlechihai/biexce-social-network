@@ -11,3 +11,14 @@ uploads/
 *.sqlite
 backups/
 .tmpdbg/
+build/
+*.db.bak*
+# Progress/handoff docs — giữ local, không vào repo
+.opencode/
+.biexce/
+PROJECT_STATUS_AND_ROADMAP.md
+docs/screenshots/
+docs/screenshots-e2e/
+docs/REPORT_*.md
+docs/*EVIDENCE*.md
+docs/BROWSER_SMOKE_CHECKLIST.md
