@@ -136,9 +136,22 @@ and refuses a non-empty target.
   is single-use (rotation); re-presenting a rotated token revokes the
   whole session (`401 refresh_replay`). Without a refresh token the
   endpoint falls back to re-minting from a still-valid JWT.
-  `GET /api/v1/auth/sessions` lists active sessions for the account
-  (`current` flags this one); `DELETE /api/v1/auth/sessions/{id}`
-  revokes one.
+`GET /api/v1/auth/sessions` lists active sessions for the account
+   (`current` flags this one); `DELETE /api/v1/auth/sessions/{id}`
+   revokes one.
+- Account lifecycle (T-023): `GET /api/v1/account/export` returns the
+  user's own data as JSON (profile, posts + media, comments, liked/saved/
+  reposted ids, following/followers, notifications). `POST
+  /api/v1/account/deactivate` (body `{"password": "..."}`) revokes every
+  session and hides the account from feeds/search/public profiles — it is
+  **reversible** (login still works, unlike a ban); `POST
+  /api/v1/account/reactivate` restores it. `POST /api/v1/account/delete`
+  (password-confirmed) is **irreversible**: the account and all of its
+  content are permanently removed and the username/email stay reserved for
+  30 days (deleting accounts keeps their moderation reports as anonymized
+  audit evidence for a 30-day retention window). Web: `/web/account` offers
+  the export download and the deactivate/reactivate/delete forms (linked
+  from your own profile).
 - Media delivery is authorized via `/media/{filename}`; uploads are
   validated (magic bytes + blocked-content scan) and quota-limited per user
   and per fleet.

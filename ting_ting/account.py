@@ -1,4 +1,4 @@
-"""Account lifecycle — data export and self-deactivation (T-023).
+"""Account lifecycle — data export, self-deactivation, deletion (T-023).
 
 * :func:`export_account` — one-shot JSON of everything the user owns
   (data portability). Only rows the user authored/created are included;
@@ -8,19 +8,30 @@
   everywhere sign-out) but does NOT block sign-in: the user may return,
   then reactivate. While deactivated the account is hidden from other
   users (feeds, search, public profile, graphs).
+* :func:`delete_account` — the irreversible end of that flow. Physically
+  removes the user and every row they own, anonymizes moderation reports
+  that reference them (evidence retention), and writes a :class:`DeletedAccount`
+  tombstone reserving username + email for :data:`TOMBSTONE_WINDOW_DAYS`.
+
+Datetime convention: SQLite stores naive UTC wall-clock strings, so every
+SQL-level TTL comparison below normalizes to naive UTC.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ting_ting.models import (
-    Activity, Comment, Follow, Like, Post, PostMedia,
-    Repost, SavedPost, User, UserProfile,
+    Activity, Block, Comment, DeletedAccount, Follow, FriendRequest,
+    Like, Mute, Post, PostMedia,
+    Repost, Report, SavedPost, User, UserProfile,
 )
 from ting_ting import sessions as session_service
 from ting_ting.auth import verify_password
+
+#: How long a deleted account's username/email stay reserved.
+TOMBSTONE_WINDOW_DAYS = 30
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -155,3 +166,157 @@ def reactivate_account(db: Session, user: User) -> None:
     user.deactivated_at = None
     db.flush()
 
+
+# ---------------------------------------------------------------------------
+# Deletion — irreversible
+# ---------------------------------------------------------------------------
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Normalize to the naive UTC wall-clock form SQLite stores/compares."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def tombstone_cutoff(now: datetime | None = None) -> datetime:
+    """Naive-UTC boundary: tombstones deleted at/after it are still fresh."""
+    now = now or datetime.now(timezone.utc)
+    return _naive_utc(now) - timedelta(days=TOMBSTONE_WINDOW_DAYS)
+
+
+def assert_credentials_available(
+    db: Session, username: str, email: str, now: datetime | None = None,
+) -> None:
+    """Reject identifiers locked by a fresh deletion tombstone.
+
+    Raises ``ValueError("username_taken")`` / ``ValueError("email_taken")``.
+    Expired tombstones do NOT block registration; their rows are purged by
+    the T-030 jobs worker.
+    """
+    cutoff = tombstone_cutoff(now)
+    if db.scalar(
+        select(func.count()).select_from(DeletedAccount).where(
+            DeletedAccount.username == username,
+            DeletedAccount.deleted_at > cutoff,
+        )
+    ):
+        raise ValueError("username_taken")
+    if db.scalar(
+        select(func.count()).select_from(DeletedAccount).where(
+            DeletedAccount.email == email,
+            DeletedAccount.deleted_at > cutoff,
+        )
+    ):
+        raise ValueError("email_taken")
+
+
+def delete_account(
+    db: Session, user: User, password: str, now: datetime | None = None,
+) -> list[str]:
+    """Delete the account and ALL its content — irreversible.
+
+    * Requires the current password (``ValueError("invalid_password")``).
+    * Anonymizes reports that reference the user (user refs -> NULL) so the
+      moderation evidence/audit survives the deletion for the retention
+      window (enforced at read time by :mod:`ting_ting.moderation`).
+    * Deletes every row the user owns or participates in (content, graph
+      edges, notifications), letting DB-level cascades finish the rest.
+    * Revoke-all sessions, then writes a :class:`DeletedAccount` tombstone
+      reserving username + email for :data:`TOMBSTONE_WINDOW_DAYS`.
+
+    Returns the on-disk media paths (post media + avatar) the caller must
+    unlink AFTER commit — the file-vs-DB ordering discipline of
+    ``mod_delete_post`` (commit first; a failed unlink leaves a reclaimable
+    orphan that ``scripts/reconcile.py`` reports, never loses live data).
+    """
+    if not verify_password(password, user.password_hash):
+        raise ValueError("invalid_password")
+
+    now = now or datetime.now(timezone.utc)
+    u = user.id
+    username = user.username
+    email = user.email
+
+    # Media files are addressed from DB rows — collect the paths first.
+    media_paths = list(db.scalars(
+        select(PostMedia.path)
+        .join(Post, PostMedia.post_id == Post.id)
+        .where(Post.author_id == u)
+        .order_by(PostMedia.id.asc())
+    ).all())
+    profile = db.get(UserProfile, u)
+    avatar = (profile.avatar_path or profile.avatar_url) if profile else None
+    if avatar:
+        media_paths.append(avatar)
+
+    # 1) Reports: keep them as anonymized evidence. NULL only the refs that
+    #    point at this user (CASE — never a blanket wipe of other refs).
+    db.execute(
+        Report.__table__.update()
+        .where(or_(Report.reporter_id == u, Report.resolved_by == u))
+        .values(
+            reporter_id=case((Report.reporter_id == u, None), else_=Report.reporter_id),
+            resolved_by=case((Report.resolved_by == u, None), else_=Report.resolved_by),
+        )
+    )
+    db.execute(
+        Report.__table__.update()
+        .where(Report.target_user_id == u)
+        .values(target_user_id=None)
+    )
+
+    # 2) Rows referencing the user (both directions) that have no DB cascade —
+    #    explicit deletes. Ordering: comments before posts so reply chains
+    #    attach to the post cascade.
+    db.execute(
+        Activity.__table__.delete()
+        .where(or_(Activity.user_id == u, Activity.actor_id == u))
+    )
+    db.execute(SavedPost.__table__.delete().where(SavedPost.user_id == u))
+    db.execute(Repost.__table__.delete().where(Repost.user_id == u))
+    db.execute(Like.__table__.delete().where(Like.user_id == u))
+    db.execute(Comment.__table__.delete().where(Comment.author_id == u))
+    db.execute(
+        FriendRequest.__table__.delete()
+        .where(or_(FriendRequest.sender_id == u, FriendRequest.recipient_id == u))
+    )
+    db.execute(
+        Block.__table__.delete()
+        .where(or_(Block.blocker_id == u, Block.blocked_id == u))
+    )
+    db.execute(
+        Mute.__table__.delete()
+        .where(or_(Mute.muted_by == u, Mute.target_id == u))
+    )
+    db.execute(
+        Follow.__table__.delete()
+        .where(or_(Follow.follower_id == u, Follow.followed_id == u))
+    )
+
+    # 3) The user's posts — DB cascades remove the comments/likes/media/
+    #    saved/reposts/notifications/mutes pinned to those posts; report
+    #    pins SET NULL.
+    db.execute(Post.__table__.delete().where(Post.author_id == u))
+
+    # 4) 1:1 profile row (no cascade).
+    db.execute(UserProfile.__table__.delete().where(UserProfile.user_id == u))
+
+    # 5) Revoke every session (sessions + refresh_tokens cascade on the
+    #    user delete below; this kills them explicitly first so the JWT
+    #    validation path sees nothing).
+    session_service.revoke_all_sessions(db, u)
+
+    # 6) Reserve the identifiers. Any pre-existing tombstone row under the
+    #    same name can only be an expired one (a live user owns the unique
+    #    name), so replace it.
+    db.execute(
+        DeletedAccount.__table__.delete().where(
+            or_(DeletedAccount.username == username, DeletedAccount.email == email)
+        )
+    )
+    db.add(DeletedAccount(username=username, email=email, deleted_at=now))
+
+    # 7) The user row itself — last, so every FK referring side is clean.
+    db.delete(user)
+    db.flush()
+    return media_paths

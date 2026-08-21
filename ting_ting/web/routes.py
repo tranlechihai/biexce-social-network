@@ -527,6 +527,43 @@ async def account_reactivate_submit(
     return RedirectResponse(url="/web/profile/me", status_code=303)
 
 
+@router.post("/account/delete")
+async def account_delete_submit(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Permanently delete the account (password-confirmed).
+
+    Removes the account and all its content; the name stays reserved for 30
+    days. Logs this browser out and is irreversible.
+    """
+    from ting_ting import account as account_logic
+    from ting_ting.media import delete_stored_file
+
+    form = await request.form()
+    password = str(form.get("password") or "")
+
+    try:
+        media_paths = account_logic.delete_account(db, me, password)
+    except ValueError as exc:
+        if exc.args[0] == "invalid_password":
+            return _render(
+                "account.html", request, username=me.username, active="profile",
+                is_deactivated=False,
+                errors=["Mật khẩu hiện tại không đúng."],
+            )
+        raise
+
+    db.commit()
+    for path in media_paths:
+        delete_stored_file(path)
+    redirect = RedirectResponse(url="/web/login", status_code=303)
+    clear_auth_cookie(redirect)
+    clear_refresh_cookie(redirect)
+    return redirect
+
+
 # ---------------------------------------------------------------------------
 # Feed / Posts
 # ---------------------------------------------------------------------------

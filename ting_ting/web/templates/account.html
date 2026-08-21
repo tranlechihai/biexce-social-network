@@ -27,4 +27,13 @@
 </form>
 {% endif %}
 
+<div class="settings-divider"></div>
+
+<form class="form" action="/web/account/delete" method="post">
+    <h2>Xóa tài khoản</h2>
+    <p class="session-hint">Hành động KHÔNG thể hoàn tác: toàn bộ bài viết, bình luận, lượt thích, quan hệ và dữ liệu cá nhân sẽ bị xóa vĩnh viễn. Tên đăng nhập và email sẽ được giữ riêng trong 30 ngày. Báo cáo nội dung bạn tham gia được giữ lại (ẩn danh) theo chính sách kiểm duyệt.</p>
+    <div class="form-group"><label for="delete_password">Mật khẩu hiện tại (xác nhận)</label><input type="password" id="delete_password" name="password" required autocomplete="current-password"></div>
+    <button type="submit" class="btn btn-danger" onclick="return confirm('XÓA VĨN VIỄN tài khoản? Hành động này không thể hoàn tác. Bạn chắc chứ?');">Xóa vĩnh viễn tài khoản</button>
+</form>
+
 </div>{% endblock %}

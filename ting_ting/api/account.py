@@ -1,8 +1,9 @@
-"""Account lifecycle endpoints — data export, self-deactivation (T-023).
+"""Account lifecycle endpoints — export, self-deactivation, deletion (T-023).
 
 * GET  /api/v1/account/export      — download everything the account owns
 * POST /api/v1/account/deactivate  — reversible pause (password-confirmed)
 * POST /api/v1/account/reactivate  — lift the pause
+* POST /api/v1/account/delete      — permanent deletion (password-confirmed)
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -18,6 +19,10 @@ router = APIRouter(prefix="/account", tags=["account"])
 
 
 class DeactivateRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
+class DeleteRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
@@ -74,3 +79,42 @@ def reactivate(
     return {"message": "Account reactivated." if was else "Account was already active.",
             "deactivated": False}
 
+
+@router.post("/delete", status_code=status.HTTP_200_OK)
+def delete(
+    body: DeleteRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """Permanently delete the account and all of its content.
+
+    Requires the current password. Content, sessions, and graph rows are
+    removed; moderation reports that referenced the account are kept
+    anonymized for the evidence-retention window. The username and email
+    stay reserved for 30 days (deletion tombstone). Irreversible.
+    """
+    from ting_ting.media import delete_stored_file
+
+    try:
+        media_paths = account_service.delete_account(db, me, body.password)
+    except ValueError as exc:
+        if exc.args[0] == "invalid_password":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "unauthenticated", "message": "Current password is incorrect."},
+            ) from None
+        raise
+
+    db.commit()
+    # Files after commit — a failed unlink leaves a reclaimable orphan, never
+    # a live row pointing at a deleted file.
+    for path in media_paths:
+        delete_stored_file(path)
+    clear_auth_cookie(response)
+    clear_refresh_cookie(response)
+    return {
+        "message": "Your account and all of its content have been permanently "
+                   "deleted. Your username and email stay reserved for 30 days.",
+        "deleted": True,
+    }

@@ -64,6 +64,27 @@ async def register(
         email=email,
         password_hash=hash_password(body.password),
     )
+    # T-023: identifiers under a fresh deletion tombstone (30-day window)
+    # are not reusable yet.
+    from ting_ting import account as account_service
+
+    try:
+        account_service.assert_credentials_available(db, username, email)
+    except ValueError as exc:
+        code = exc.args[0]
+        if code in ("username_taken", "email_taken"):
+            target = "username" if code == "username_taken" else "email"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "conflict",
+                    "message": (
+                        f"This {target} was recently deleted and stays "
+                        f"reserved for 30 days."
+                    ),
+                },
+            ) from None
+
     db.add(new_user)
     try:
         db.commit()

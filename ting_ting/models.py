@@ -50,6 +50,30 @@ class User(Base):
     )
 
 
+class DeletedAccount(Base):
+    """Tombstone left when a user deletes their account (T-023).
+
+    Locks the deleted account's ``username`` and ``email`` for a retention
+    window (30 days) so the identifiers are not immediately reusable — that
+    prevents a new registrant from impersonating someone who just left and
+    from hijacking in-flight deep links / notifications that still name them.
+    After the window the row may be purged (T-030 jobs) and the identifiers
+    become reusable. The actual account data is physically deleted on deletion
+    (not kept in this row) — this table only reserves the names.
+    """
+
+    __tablename__ = "deleted_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(unique=True, nullable=False, index=True)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=None,
+    )
+
+
 class UserProfile(Base):
     """Extended optional profile data kept separate for additive MVP evolution."""
 
@@ -454,11 +478,15 @@ class Report(Base):
         ),
     )
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    reporter_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id"), nullable=False, index=True,
+    # A report is moderation evidence: it outlives BOTH the content it pinned
+    # (post/comment -> SET NULL) and the accounts it references (user -> SET
+    # NULL). Deleting a user therefore anonymizes their reports (NULL refs)
+    # instead of destroying the audit trail (T-023).
+    reporter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
-    target_user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id"), nullable=False, index=True,
+    target_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     # SET NULL (not CASCADE): a report outlives the content it pinned — the
     # audit trail must survive moderation deletion of the post/comment.
@@ -472,7 +500,7 @@ class Report(Base):
     status: Mapped[str] = mapped_column(nullable=False, default="pending")
     resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_by: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

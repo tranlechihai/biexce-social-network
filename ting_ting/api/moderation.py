@@ -194,7 +194,7 @@ def list_reports(
 def _mod_resolve(db: Session, me: User, report_id: int, dismiss: bool,
                  note: str | None):
     report = db.get(Report, report_id)
-    if report is None:
+    if report is None or moderation.report_expired(report):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_found", "message": "Report not found."},

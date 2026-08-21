@@ -214,6 +214,10 @@ _LEGACY_REQUIRED_FK_ACTIONS = (
     ("sessions", "user_id", "users", "CASCADE"),
     ("reports", "post_id", "posts", "SET NULL"),
     ("reports", "comment_id", "comments", "SET NULL"),
+    # 0010 — a report outlives the accounts it references (evidence retention)
+    ("reports", "reporter_id", "users", "SET NULL"),
+    ("reports", "target_user_id", "users", "SET NULL"),
+    ("reports", "resolved_by", "users", "SET NULL"),
 )
 
 

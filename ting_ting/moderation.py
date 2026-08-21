@@ -14,7 +14,7 @@ Rules:
   when it is resolved.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -27,6 +27,28 @@ REPORT_REASONS = ("spam", "harassment", "hate_speech", "false_info", "other")
 PENDING = "pending"
 RESOLVED = "resolved"
 DISMISSED = "dismissed"
+
+#: Moderation evidence/audit (report rows) is kept for this long, then purged
+#: by the T-030 jobs worker. Until the purge lands, expired rows are hidden
+#: at the read boundaries (``list_reports`` / resolve guards) — the retention
+#: decision of 2026-08-21.
+EVIDENCE_RETENTION_DAYS = 30
+
+
+def retention_cutoff(now: datetime | None = None) -> datetime:
+    """Naive-UTC boundary: reports created before it are expired."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc)
+    return now.replace(tzinfo=None) - timedelta(days=EVIDENCE_RETENTION_DAYS)
+
+
+def report_expired(report: Report, now: datetime | None = None) -> bool:
+    """True once a report is past the evidence retention window."""
+    created = report.created_at
+    if created.tzinfo is not None:
+        created = created.astimezone(timezone.utc).replace(tzinfo=None)
+    return created < retention_cutoff(now)
 
 
 # ---------------------------------------------------------------------------
@@ -83,13 +105,15 @@ def list_reports(
     status_filter: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    now: datetime | None = None,
 ) -> list[Report]:
-    """Mod-only report queue, newest first."""
+    """Mod-only report queue, newest first, minus rows past the evidence
+    retention window (read-side filter until the T-030 purge lands)."""
     if status_filter is not None and status_filter not in (
         PENDING, RESOLVED, DISMISSED,
     ):
         raise ValueError("invalid_status")
-    conditions = []
+    conditions = [Report.created_at >= retention_cutoff(now)]
     if status_filter:
         conditions.append(Report.status == status_filter)
     return list(
