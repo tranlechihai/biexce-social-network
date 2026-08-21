@@ -26,11 +26,17 @@ RUN useradd --create-home --uid 10001 app
 WORKDIR /app
 
 # Dependencies first (layer cache): pinned prod lock, then the application
-# itself without re-resolving dependencies.
+# itself without re-resolving dependencies. The editable install keeps
+# ``ting_ting/__file__`` under /app so ``ting_ting.database`` resolves
+# alembic.ini from the repo root; the egg-info it leaves in the source tree
+# is build metadata — remove it so no *.egg-info leak can reach the image
+# (CI image hygiene asserts this). The PEP 660 editable finder in
+# site-packages does not depend on the egg-info directory at import time.
 COPY requirements.lock pyproject.toml ./
 COPY ting_ting ./ting_ting
 RUN pip install --no-cache-dir -r requirements.lock \
-    && pip install --no-cache-dir --no-deps -e .
+    && pip install --no-cache-dir --no-deps -e . \
+    && rm -rf /app/ting_ting.egg-info
 
 # Alembic lives next to the package: `ting_ting.database` locates alembic.ini
 # relative to the repo root, so the migration service and the app's embedded
