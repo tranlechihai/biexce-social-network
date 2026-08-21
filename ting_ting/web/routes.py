@@ -448,6 +448,86 @@ async def logout_all_submit(
 
 
 # ---------------------------------------------------------------------------
+# Account lifecycle (T-023): data export + self-deactivation
+# ---------------------------------------------------------------------------
+
+@router.get("/account")
+async def account_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    return _render(
+        "account.html", request, username=me.username, active="profile",
+        is_deactivated=me.deactivated_at is not None,
+    )
+
+
+@router.get("/account/export")
+async def account_export(
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+) -> JSONResponse:
+    """Download the account's full data document (their data only)."""
+    from ting_ting import account as account_logic
+
+    document = account_logic.export_account(db, me)
+    filename = f"account-export-{me.username}-{document['exported_at'][:10]}.json"
+    return JSONResponse(
+        document,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/account/deactivate")
+async def account_deactivate_submit(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Reversibly deactivate the account (password-confirmed).
+
+    Revokes every session, then logs this browser out. The account can
+    be reactivated later by signing back in.
+    """
+    from ting_ting import account as account_logic
+
+    form = await request.form()
+    password = str(form.get("password") or "")
+
+    try:
+        account_logic.deactivate_account(db, me, password)
+    except ValueError as exc:
+        if exc.args[0] == "invalid_password":
+            return _render(
+                "account.html", request, username=me.username, active="profile",
+                is_deactivated=False,
+                errors=["Mật khẩu hiện tại không đúng."],
+            )
+        raise
+
+    db.commit()
+    redirect = RedirectResponse(url="/web/login", status_code=303)
+    clear_auth_cookie(redirect)
+    clear_refresh_cookie(redirect)
+    return redirect
+
+
+@router.post("/account/reactivate")
+async def account_reactivate_submit(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Lift a self-deactivation — the account becomes visible again."""
+    from ting_ting import account as account_logic
+
+    account_logic.reactivate_account(db, me)
+    db.commit()
+    return RedirectResponse(url="/web/profile/me", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # Feed / Posts
 # ---------------------------------------------------------------------------
 
@@ -695,6 +775,9 @@ async def user_profile_page(
         )
     ).scalar_one_or_none()
     if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if target.deactivated_at is not None and target.id != me.id:
+        # Self-deactivated users are hidden from everyone but themselves (T-023).
         raise HTTPException(status_code=404, detail="User not found.")
 
     rel = relationship_state(db, me.id, target.id)

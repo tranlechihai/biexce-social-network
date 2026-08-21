@@ -181,10 +181,16 @@ def _banned_author_ids():
     return select(User.id).where(User.banned_at.is_not(None))
 
 
+def _deactivated_author_ids():
+    """Subquery: self-deactivated user ids — posts leave every feed (T-023)."""
+    return select(User.id).where(User.deactivated_at.is_not(None))
+
+
 def _feed_suppression_conditions(viewer_id: int):
     return [
         Post.author_id.not_in(_muted_ids(viewer_id)),
         Post.author_id.not_in(_banned_author_ids()),
+        Post.author_id.not_in(_deactivated_author_ids()),
         Post.id.not_in(_muted_post_ids(viewer_id)),
     ]
 

@@ -215,7 +215,7 @@ class TestT019AlembicAuthority:
             _alembic_head_revision,
             _with_database_url,
         )
-        from ting_ting.models import Comment, Like, Post, User
+        from ting_ting.models import Comment, Like, Post
 
         db_path = str(tmp_path / "alembic_behind.db")
         engine = _create_test_engine(db_path)
@@ -227,18 +227,25 @@ class TestT019AlembicAuthority:
             _alembic_command.upgrade(_alembic_config(), "20260819_0005")
 
         sm = sessionmaker(bind=engine, expire_on_commit=False)
+        # Seed the user with raw SQL: the 0005 schema predates columns added
+        # by later migrations (e.g. deactivated_at in 0009), so the current
+        # ORM model would reference columns that do not exist yet.
         with sm() as s:
-            author = User(
-                username="survivor", email="survivor@example.com",
-                password_hash="$2b$12$fakehashfordata",
+            s.execute(
+                text(
+                    "INSERT INTO users (username, email, password_hash, is_moderator) "
+                    "VALUES ('survivor', 'survivor@example.com', "
+                    "'$2b$12$fakehashfordata', 0)"
+                )
             )
-            s.add(author)
-            s.flush()
-            post = Post(author_id=author.id, content="keep me", audience="PUBLIC")
+            author_id = s.execute(
+                text("SELECT id FROM users WHERE username = 'survivor'")
+            ).scalar()
+            post = Post(author_id=author_id, content="keep me", audience="PUBLIC")
             s.add(post)
             s.flush()
-            s.add(Like(user_id=author.id, post_id=post.id))
-            s.add(Comment(post_id=post.id, author_id=author.id, content="child"))
+            s.add(Like(user_id=author_id, post_id=post.id))
+            s.add(Comment(post_id=post.id, author_id=author_id, content="child"))
             s.commit()
             post_id = post.id
 

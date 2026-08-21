@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Tài khoản — Biexce{% endblock %}
+{% block content %}<div class="people-page"><div class="page-heading"><h1>Tài khoản</h1></div>
+
+{% for error in errors or [] %}<div class="form-error" role="alert">{{ error }}</div>{% endfor %}
+
+<form class="form" action="/web/account/export" method="get">
+    <h2>Dữ liệu của bạn</h2>
+    <p class="session-hint">Tải về một file JSON chứa toàn bộ dữ liệu tài khoản: hồ sơ, bài viết, bình luận, lượt thích, bài đã lưu, quan hệ theo dõi và thông báo.</p>
+    <button type="submit" class="btn btn-primary">Tải dữ liệu</button>
+</form>
+
+<div class="settings-divider"></div>
+
+{% if is_deactivated %}
+<form class="form" action="/web/account/reactivate" method="post">
+    <h2>Tài khoản đang bị vô hiệu hóa</h2>
+    <p class="session-hint">Tài khoản của bạn đang ẩn khỏi mọi người. Bật lại để xuất hiện bình thường trên nền tảng.</p>
+    <button type="submit" class="btn btn-primary">Bật lại tài khoản</button>
+</form>
+{% else %}
+<form class="form" action="/web/account/deactivate" method="post">
+    <h2>Vô hiệu hóa tài khoản</h2>
+    <p class="session-hint">Tài khoản sẽ ẩn khỏi nguồn bài viết, tìm kiếm, hồ sơ công khai và danh sách quan hệ của mọi người. Bạn vẫn đăng nhập được và bật lại bất cứ lúc nào. Dữ liệu không bị xóa.</p>
+    <div class="form-group"><label for="deactivate_password">Mật khẩu hiện tại (xác nhận)</label><input type="password" id="deactivate_password" name="password" required autocomplete="current-password"></div>
+    <button type="submit" class="btn btn-secondary" onclick="return confirm('Vô hiệu hóa tài khoản? Bạn sẽ ẩn khỏi mọi người cho đến khi bật lại.');">Vô hiệu hóa tài khoản</button>
+</form>
+{% endif %}
+
+</div>{% endblock %}

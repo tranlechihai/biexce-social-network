@@ -18,7 +18,10 @@ from ting_ting.database import get_engine, get_session_factory, validate_and_ini
 from ting_ting.auth import WebAuthRedirect, WebBanned, decode_token
 from ting_ting import notifications as notification_service
 from ting_ting.errors import register_error_handlers
-from ting_ting.api import auth, profile, social, posts, interactions, extensions, notifications, users, moderation
+from ting_ting.api import (
+    account, auth, extensions, interactions, moderation, notifications,
+    posts, profile, social, users,
+)
 from ting_ting.media import router as media_router
 from ting_ting.security import (
     CSRF_COOKIE_NAME,
@@ -144,7 +147,7 @@ async def _metrics_endpoint():
 #   /api/...     legacy alias, DEPRECATED: responses carry Deprecation/Warning
 #                headers. Remove the legacy prefix in the next major version.
 API_ROUTERS = [
-    auth.router, profile.router, social.router,
+    auth.router, profile.router, social.router, account.router,
     posts.router, posts.feed_router, interactions.router,
     extensions.profile_router, extensions.social_router,
     extensions.activity_router, extensions.feature_router,

@@ -42,6 +42,13 @@ class User(Base):
     is_moderator: Mapped[bool] = mapped_column(nullable=False, default=False)
     banned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
+    # Account lifecycle (T-023): self-deactivation. Reversible — the user can
+    # sign back in (login is NOT blocked, unlike a ban) and reactivate. While
+    # set, the user is hidden from feeds, search, public profiles and graphs.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None,
+    )
+
 
 class UserProfile(Base):
     """Extended optional profile data kept separate for additive MVP evolution."""

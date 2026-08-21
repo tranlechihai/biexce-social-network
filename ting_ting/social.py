@@ -509,6 +509,7 @@ def search_users(
             select(Block.blocker_id).where(Block.blocked_id == viewer_id)
         ),
         User.banned_at.is_(None),
+        User.deactivated_at.is_(None),  # T-023: self-deactivated users hide
     ]
 
     text = (query or "").strip().lower()

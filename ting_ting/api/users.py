@@ -116,6 +116,15 @@ def get_public_user(
             relationship=rel,
         )
 
+    if target.deactivated_at is not None and target.id != me.id:
+        # Self-deactivated (T-023): hidden from everyone but the owner.
+        # Redacted (not 404) so a previously-seen profile does not break.
+        return UserPublicResponse(
+            id=target.id,
+            username=target.username,
+            relationship="none",
+        )
+
     profile = db.get(UserProfile, target.id)
     counts = social.user_counts(db, target.id)
     db.commit()
@@ -144,6 +153,12 @@ def _followers_or_404(
     target = _find_by_username(db, username)
     if social.is_blocked(db, me.id, target.id):
         # Hide the graph entirely for blocked pairs (no existence leaks).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "not_found", "message": "User not found."},
+        )
+    if target.deactivated_at is not None and target.id != me.id:
+        # A self-deactivated user's graph is off-limits too (T-023).
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_found", "message": "User not found."},
@@ -183,6 +198,7 @@ def _followers_or_404(
         if (
             user is not None
             and user.banned_at is None
+            and user.deactivated_at is None  # T-023: hide self-deactivated
             and not social.is_blocked(db, me.id, user.id)
         ):
             results.append(_user_ref(user))
