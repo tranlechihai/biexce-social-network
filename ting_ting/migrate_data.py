@@ -20,7 +20,7 @@ import argparse
 import os
 import sys
 
-from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy import Integer, create_engine, func, inspect, select, text
 from sqlalchemy.engine import Engine
 
 from ting_ting.models import Base
@@ -33,8 +33,18 @@ _SELF_REFERENCING = {"comments"}
 
 
 def _has_int_id(table) -> bool:
+    """True for a single-column, INTEGER-typed id primary key.
+
+    Not every table's PK is a serial integer — ``sessions.id`` is a VARCHAR
+    uuid — so sequence re-anchoring and max(id) checks must be limited to
+    integer ids (``setval`` on a text column is a type error on PostgreSQL).
+    """
     columns = list(table.primary_key.columns) if table.primary_key else []
-    return len(columns) == 1 and columns[0].name == "id"
+    return (
+        len(columns) == 1
+        and columns[0].name == "id"
+        and isinstance(columns[0].type, Integer)
+    )
 
 
 def _verify_source(source: Engine) -> None:
@@ -73,6 +83,25 @@ def _verify_source(source: Engine) -> None:
                 f"Source table {name!r} is missing columns {sorted(missing)!r}; "
                 "the schema has drifted from the application. Refusing to copy."
             )
+
+    # Foreign-key integrity: PostgreSQL enforces every FK on every row, so a
+    # source containing orphan rows (e.g. left behind by maintenance done
+    # with SQLite's default foreign_keys=OFF) would deep-fail mid-copy. The
+    # app runtime enforces FKs, but manual/dev database surgery often does
+    # not — check explicitly and fail with an actionable message.
+    with source.connect() as conn:
+        violations = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    if violations:
+        # foreign_key_check rows: (table, rowid, referenced_table, fk_id)
+        shown = "; ".join(
+            f"{r[0]}(rowid={r[1]}) -> missing row in {r[2]}"
+            for r in violations[:10]
+        )
+        raise ValueError(
+            f"Source database has {len(violations)} foreign-key violation(s) "
+            f"(orphan rows): {shown}. Clean up the source first (back it up), "
+            "then retry. Aborted before any data was copied."
+        )
 
 
 def copy_database(

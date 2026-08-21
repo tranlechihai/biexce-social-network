@@ -8,7 +8,7 @@ import os
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, func, inspect, select
 
 from ting_ting.migrate_data import copy_database
 from ting_ting.models import (
@@ -18,6 +18,7 @@ from ting_ting.models import (
     Like,
     Post,
     PostMedia,
+    RefreshToken,
     Repost,
     SavedPost,
     User,
@@ -82,6 +83,40 @@ def test_copy_preserves_ids_and_counts(tmp_path: Path):
     assert copied["posts"] == 1
     assert user.id == 7
     assert post.id == 11
+    source.dispose()
+    target.dispose()
+
+
+def test_copy_refuses_fk_orphan_source_without_mutation(tmp_path: Path):
+    """A source with orphan rows (e.g. left by maintenance done on a
+    foreign_keys=OFF connection — SQLite's default) is refused BEFORE the
+    copy, with a message that names the offending rows, and the target is
+    left untouched."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    source = create_engine(f"sqlite:///{tmp_path / 'source.db'}")
+    target = create_engine(f"sqlite:///{tmp_path / 'target.db'}")
+    Base.metadata.create_all(source)
+    _upgrade(f"sqlite:///{tmp_path / 'target.db'}")
+
+    # Default sqlite3 connections run with foreign_keys=OFF, so this orphan
+    # insert succeeds — exactly how dev/maintenance rows end up dangling.
+    with source.connect() as connection:
+        connection.execute(RefreshToken.__table__.insert(), [{
+            "id": 3,
+            "session_id": "deadbeef" * 4,
+            "user_id": 999,
+            "token_hash": "x" * 64,
+            "created_at": now,
+            "expires_at": now,
+        }])
+        connection.commit()
+
+    with pytest.raises(ValueError, match="foreign-key violation"):
+        copy_database(source, target, require_postgresql=False)
+
+    # Refusal happened before any write: target still pristine.
+    with target.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(User)) == 0
     source.dispose()
     target.dispose()
 

@@ -146,6 +146,18 @@ def _sqlite_rebuild_reports(user_fk_ondelete: str | None) -> None:
     # SQLite cannot ALTER a column's nullability or FK: rebuild and copy.
     # env.py runs each migration in one transaction (transactional DDL), so a
     # failure anywhere rolls the whole rebuild back.
+    #
+    # PostgreSQL: the OLD ``reports`` table still owns the index that backs
+    # its ``uq_report_target`` unique constraint, and PG index names are
+    # unique PER SCHEMA — CREATE TABLE reports_new with the same constraint
+    # name would fail with "relation already exists". Dropping the old
+    # constraint (which drops its index) first is safe: it is recreated with
+    # reports_new after the swap, and no other session can observe the gap
+    # (single migration transaction).
+    if op.get_context().dialect.name == "postgresql":
+        op.execute(sa.text(
+            "ALTER TABLE reports DROP CONSTRAINT IF EXISTS uq_report_target"
+        ))
     op.execute(sa.text("DROP TABLE IF EXISTS reports_new"))
     op.execute(CreateTable(_rebuild_reports(user_fk_ondelete)))
     op.execute(
