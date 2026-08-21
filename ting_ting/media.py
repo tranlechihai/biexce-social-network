@@ -1,5 +1,6 @@
 """Authorized delivery and lifecycle helpers for locally stored media."""
 
+import os
 from pathlib import Path
 
 from uuid import uuid4
@@ -20,7 +21,23 @@ from ting_ting.uploads import (
 
 
 router = APIRouter(tags=["media"])
-UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
+
+
+def _resolve_uploads_dir() -> Path:
+    """Media storage directory.
+
+    Containers set ``TING_UPLOADS_DIR`` to the mounted volume (e.g.
+    ``/app/uploads``); otherwise the dev layout ``<repo>/uploads`` is used.
+    Relative values resolve against the CWD.
+    """
+    value = os.environ.get("TING_UPLOADS_DIR")
+    if value:
+        path = Path(value)
+        return path if path.is_absolute() else Path.cwd() / path
+    return Path(__file__).resolve().parent.parent / "uploads"
+
+
+UPLOADS_DIR = _resolve_uploads_dir()
 
 
 async def store_post_upload(

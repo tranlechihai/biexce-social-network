@@ -114,10 +114,10 @@ async def _store_image(upload, prefix: str, max_bytes: int = 5 * 1024 * 1024) ->
     suffix = next((ext for magic, ext in signatures if data.startswith(magic)), None)
     if not suffix:
         raise ValueError("invalid_image")
-    uploads = Path(__file__).resolve().parents[2] / "uploads"
-    uploads.mkdir(exist_ok=True)
+    from ting_ting.media import UPLOADS_DIR
+    UPLOADS_DIR.mkdir(exist_ok=True)
     filename = f"{prefix}-{uuid4().hex}{suffix}"
-    (uploads / filename).write_bytes(data)
+    (UPLOADS_DIR / filename).write_bytes(data)
     return f"/media/{filename}"
 
 

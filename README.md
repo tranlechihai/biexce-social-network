@@ -100,7 +100,28 @@ systemctl --user disable --now biexce-social-user.service
 The service cannot survive a full logout/reboot while `loginctl show-user
 chihai -p Linger` reports `no`; enabling linger requires an administrator.
 
-### PostgreSQL and Alembic
+### Docker deployment (production)
+
+The supported production topology is Docker-only (`compose.yaml`): a
+PostgreSQL container, a one-shot `alembic upgrade head` container, and the
+app (non-root, single worker) with the media directory on a named volume.
+
+```bash
+export POSTGRES_PASSWORD="$(openssl rand -hex 16)"
+export TING_JWT_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
+curl -s http://127.0.0.1:8080/health   # -> {"status":"ok"}
+curl -s http://127.0.0.1:8080/ready    # -> {"status":"ready","database":"ok"}
+```
+
+Migrating existing SQLite data is a one-shot, fail-closed step (full
+playbook, permissions and evidence: `docs/DOCKER_PG_HANDOFF.md`):
+
+```bash
+SQLITE_SOURCE=/path/to/ting_ting.db docker compose --profile data run --rm data-copy
+```
+
+### PostgreSQL and Alembic (manual)
 
 Set a PostgreSQL URL without committing credentials, then apply the schema:
 

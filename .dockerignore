@@ -1,0 +1,42 @@
+# Build context exclusion — the image must never contain secrets, local
+# databases, user media, or VCS/metadata. Mirrors .gitignore plus build cruft.
+
+# VCS / editor / agent metadata
+.git
+.github
+.opencode/
+.biexce/
+.tmpdbg/
+
+# Secrets / local config (NEVER in an image)
+.env
+.venv/
+
+# Local databases and backups (data moves via the data-copy service / volumes)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite
+*.db.bak*
+backups/
+
+# User media (lives on the uploads-data volume)
+uploads/
+
+# Test & build artifacts
+tests/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Progress docs kept local and not part of the runtime
+PROJECT_STATUS_AND_ROADMAP.md
+ting_ting.egg-info/
+logs
+logs.*

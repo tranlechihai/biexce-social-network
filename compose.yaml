@@ -1,0 +1,104 @@
+# Biexce Social — Docker-only deployment (IT runs; see docs/DOCKER_PG_HANDOFF.md).
+#
+# Required environment (deploy host — NOT committed, NOT baked into the image):
+#   POSTGRES_PASSWORD   password for the postgres:16 container (openssl rand -hex 16)
+#   TING_JWT_SECRET     app JWT signing secret (openssl rand -hex 32)
+# Optional:
+#   TING_COOKIE_SECURE  true behind HTTPS (default false)
+#   TING_RATE_LIMIT_ENABLED (default true)
+#   TING_DEBUG          (default false)
+#   SQLITE_SOURCE       path to the legacy ting_ting.db file, used by the
+#                       one-shot `data-copy` service (default ./ting_ting.db)
+#
+# Normal operation:
+#   docker compose up -d                     # db -> migration -> app
+#   curl -s http://127.0.0.1:8080/health     # {"status":"ok"}
+#   curl -s http://127.0.0.1:8080/ready      # {"status":"ready","database":"ok"}
+# One-time SQLite data transfer (rehearsal first — see handoff doc):
+#   docker compose --profile data run --rm data-copy
+#
+# Notes:
+#   * `db` publishes NO port: PostgreSQL is reachable only on the internal
+#     compose network.
+#   * `app` binds 127.0.0.1:8080 on the host; IT's ingress/terminator
+#     forwards to it.
+#   * `migration` is a one-shot `alembic upgrade head`; the app also refuses
+#     to start when the stamp is not at head (defense in depth).
+
+name: biexce-social
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: biexce_social
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the deploy environment}
+      POSTGRES_DB: biexce_social
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biexce_social -d biexce_social"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migration:
+    build: .
+    image: biexce-social:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      TING_DATABASE_URL: postgresql+psycopg://biexce_social:${POSTGRES_PASSWORD}@db:5432/biexce_social
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot, manual (profile "data"): copies the legacy SQLite file into the
+  # PostgreSQL database. The source file is mounted READ-ONLY; the copy is
+  # fail-closed (empty target, verified counts, sequences re-anchored).
+  data-copy:
+    build: .
+    image: biexce-social:local
+    profiles: ["data"]
+    command: ["python", "-m", "ting_ting.migrate_data", "--source", "sqlite:////data/ting_ting.db"]
+    environment:
+      TING_DATABASE_URL: postgresql+psycopg://biexce_social:${POSTGRES_PASSWORD}@db:5432/biexce_social
+    volumes:
+      - ${SQLITE_SOURCE:-./ting_ting.db}:/data/ting_ting.db:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    image: biexce-social:local
+    restart: unless-stopped
+    environment:
+      TING_DATABASE_URL: postgresql+psycopg://biexce_social:${POSTGRES_PASSWORD}@db:5432/biexce_social
+      TING_JWT_SECRET: ${TING_JWT_SECRET:?set TING_JWT_SECRET (openssl rand -hex 32)}
+      TING_COOKIE_SECURE: ${TING_COOKIE_SECURE:-false}
+      TING_RATE_LIMIT_ENABLED: ${TING_RATE_LIMIT_ENABLED:-true}
+      TING_DEBUG: ${TING_DEBUG:-false}
+      TING_UPLOADS_DIR: /app/uploads
+    ports:
+      # Host-side bind address only; IT's ingress forwards public traffic.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - uploads-data:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 15s
+
+volumes:
+  pgdata:
+  uploads-data:

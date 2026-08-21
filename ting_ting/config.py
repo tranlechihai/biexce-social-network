@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Cookie settings
     cookie_secure: bool = False  # True for staging HTTPS, False for local HTTP
 
+    # Upload storage directory (relative values resolve against the CWD).
+    # The container sets TING_UPLOADS_DIR to the mounted volume (/app/uploads).
+    uploads_dir: str = "uploads"
+
     # Upload storage quotas (measured on real disk usage of uploads/)
     upload_quota_mb: float = 512.0
     total_upload_quota_mb: float = 5120.0

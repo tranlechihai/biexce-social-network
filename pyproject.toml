@@ -32,6 +32,15 @@ test = [
 [tool.setuptools.packages.find]
 include = ["ting_ting*"]
 
+# Non-Python files the runtime reads from the package (web UI + assets).
+# Without this a plain `pip install .` (wheel) silently loses the templates
+# and static files — the container image and any venv install depend on it.
+[tool.setuptools.package-data]
+"ting_ting" = [
+    "static/**/*",
+    "web/templates/**/*",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

@@ -2,7 +2,8 @@
 
 Thủ tục vận hành: deploy, rollback, backup/restore, sự cố. Môi trường hiện tại:
 service systemd **user** `biexce-social-user.service` trên `:8080`, SQLite
-`ting_ting.db` (PostgreSQL là bước cutover tiếp theo, cần quyền admin).
+`ting_ting.db`. Cutover PostgreSQL sẽ chạy theo mô hình **Docker-only** (IT
+xác nhận 2026-08-21) — playbook đầy đủ: `docs/DOCKER_PG_HANDOFF.md`.
 
 ## 1. Deploy code mới
 
@@ -52,8 +53,13 @@ ls backups/                       # backup-<ts>.sqlite + uploads-<ts>.tar.gz
   `scripts/restore_sqlite.sh backups/backup-<ts>.sqlite`
   (script tự verify, tự sao an toàn DB hiện tại ra `backups/pre-restore-<ts>.sqlite`,
   stop → replace → start service. Restore uploads bằng `tar -xzf` trong repo).
-- PostgreSQL (sau cutover): `pg_dump -Fc` (backup.sh tự nhận URL PG),
-  restore bằng `pg_restore`.
+- PostgreSQL (sau cutover, chạy trong container):
+  `docker compose exec db pg_dump -Fc -f /tmp/biexce.dump biexce_social`
+  rồi `docker cp db:/tmp/biexce.dump backups/` — cron hàng ngày tương đương
+  cron SQLite ở trên. Restore: `docker compose exec -i db pg_restore -U
+  biexce_social -d biexce_social --clean < biexce.dump` (dừng app trước).
+  Uploads sống trong volume `uploads-data`; backup bằng
+  `docker run --rm -v <project>_uploads-data:/u --entrypoint tar biexce-social:local -czf - -C /u .`
 
 ## 4. Quan sát
 
@@ -92,16 +98,30 @@ mạnh (đang bị brute-force — rate limit login là 20/phút/IP, xem xét gi
 - `TING_DEMO_PASSWORD` — bắt buộc khi chạy `python -m ting_ting seed`
 - `TING_UPLOAD_QUOTA_MB` — quota upload/user, mặc định 512
 - `TING_TOTAL_UPLOAD_QUOTA_MB` — quota upload toàn hệ thống, mặc định 5120
+- `TING_UPLOADS_DIR` — thư mục media; dev để `uploads` (repo), container
+  trong compose bị set `/app/uploads` (volume `uploads-data`)
 
-## 7. Cutover PostgreSQL (khi có quyền admin)
+Biến riêng của môi trường host chạy compose (không nằm trong `.env` app):
+`POSTGRES_PASSWORD`, `TING_JWT_SECRET` (compose.yaml khai báo bắt buộc),
+tuỳ chọn `SQLITE_SOURCE`, `TING_COOKIE_SECURE`, `TING_RATE_LIMIT_ENABLED`,
+`TING_DEBUG`.
 
-1. Chạy `scripts/backup.sh` (SQLite) + giữ lại file DB.
-2. Tạo database + user PG mới; viết `TING_DATABASE_URL` PG vào `.env`.
-3. `alembic upgrade head` (PG paths 0002–0007 đã viết nhưng chưa test — chạy trên DB rỗng, kiểm tra từng revision).
-4. Import dữ liệu SQLite: `./.venv/bin/python -m ting_ting.migrate_data --source sqlite:///./ting_ting.db`
-   (target phải rỗng; giữ ID, verify count từng bảng, reset sequence; từ chối ghi đè).
-   Nếu không cần dữ liệu cũ: seed DB PG rỗng bằng `python -m ting_ting seed`.
-5. `pytest -q` + live check, rồi restart service. SQLite file cũ giữ lại làm backup.
+## 7. Cutover PostgreSQL (mô hình Docker-only)
+
+Playbook đầy đủ (trách nhiệm ai làm gì, lệnh từng bước, evidence):
+**`docs/DOCKER_PG_HANDOFF.md`**. Tóm tắt:
+
+1. Dựng DB + migration trong container: `docker compose up -d`
+   (services `db` → `migration` → `app`; app tự từ chối chạy nếu
+   alembic_version ≠ head).
+2. Dừng writer SQLite trong maintenance window + `scripts/backup.sh`.
+3. Copy dữ liệu (one-shot, fail-closed):
+   `SQLITE_SOURCE=<path ting_ting.db> docker compose --profile data run --rm data-copy`
+   — giữ ID, verify count + max(id) từng bảng, re-anchor sequence; từ chối
+   nếu target không rỗng hoặc nguồn lệch schema/revision.
+4. Copy `uploads/` vào volume `uploads-data`.
+5. Smoke + `pg_dump` ngay sau đó (mục 3); giữ file SQLite cũ làm rollback
+   target cho tới 7 ngày ổn định (rollback: mục 6 của handoff doc).
 
 ## 8. Mở khóa moderator (dev)
 

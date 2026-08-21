@@ -11,8 +11,13 @@ SQLite startup semantics:
   against head; if it matches -> ``alembic stamp head``; otherwise fail
   closed (no implicit ``create_all`` patching)
 
-PostgreSQL startup only validates that the required tables exist (operators
-run ``alembic upgrade head``).
+PostgreSQL startup semantics:
+* fresh empty database (no tables)           -> ``alembic upgrade head``
+* stamped (``alembic_version`` present)      -> ``alembic upgrade head``
+  (no-op at head; applies pending migrations when behind), then verify head
+* tables without a stamp                      -> fail closed (unmanaged DB)
+In all PostgreSQL cases the app refuses to start unless the alembic_version
+stamp equals the head revision (``_require_head``).
 """
 
 import contextlib
@@ -140,8 +145,12 @@ def _with_database_url(engine: Engine):
     env.py reads ``TING_DATABASE_URL`` from the environment; overriding it
     here (and restoring afterwards) guarantees the embedded run touches the
     engine we are initializing — not whatever URL the process env holds.
+    The password must NOT be hidden: env.py connects with this exact URL, and
+    ``hide_password=True`` breaks any authenticated connection (PostgreSQL).
+    The value is process-local (not logged) and restored before the block
+    returns, so it never escapes the embedded alembic call.
     """
-    url = engine.url.render_as_string(hide_password=True)
+    url = engine.url.render_as_string(hide_password=False)
     old = os.environ.get("TING_DATABASE_URL")
     os.environ["TING_DATABASE_URL"] = url
     try:
@@ -314,6 +323,21 @@ def validate_and_initialize_schema(
     existing_tables = set(inspector.get_table_names())
 
     if engine.name == "postgresql":
+        # PostgreSQL: Alembic is the schema authority too, but the app never
+        # auto-downgrades and never stamps an unmanaged database. Fresh empty
+        # databases and stamped-but-behind databases get upgraded; anything
+        # else (tables without an alembic_version stamp) is fail-closed.
+        if "alembic_version" in existing_tables:
+            _alembic_upgrade_head(engine)
+        elif not existing_tables:
+            _alembic_upgrade_head(engine)
+        else:
+            raise ValueError(
+                "PostgreSQL database contains tables but no alembic_version "
+                "stamp — it was not created by this application's migrations. "
+                "Refusing to start; run 'alembic upgrade head' or point the "
+                "app at the correct database."
+            )
         expected_tables = set(Base.metadata.tables)
         missing_tables = expected_tables - existing_tables
         if missing_tables:
@@ -321,6 +345,7 @@ def validate_and_initialize_schema(
                 "PostgreSQL schema is not at the required Alembic revision; "
                 f"missing tables {sorted(missing_tables)!r}. Run 'alembic upgrade head'."
             )
+        _require_head(engine)
         return engine
 
     # --- SQLite: Alembic is the schema authority ---
