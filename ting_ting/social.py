@@ -6,6 +6,7 @@ call the authorization helpers in this module rather than duplicating logic.
 """
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ting_ting.models import Block, Follow, FriendRequest, Mute, User
@@ -116,7 +117,14 @@ def create_friend_request(
         state="pending",
     )
     db.add(req)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Concurrent same-pair request won the unique-pair race: the check
+        # above passed before the other writer committed. Converge to the
+        # same 409 the sequential path produces instead of a 500.
+        db.rollback()
+        raise ValueError("already_exists") from None
     return req
 
 
@@ -317,7 +325,14 @@ def block_user(
     if existing is None:
         blk = Block(blocker_id=blocker.id, blocked_id=blocked.id)
         db.add(blk)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            # Concurrent block won the unique-pair race. Roll back the
+            # relationship severing too (one flush covered it) — the other
+            # writer's transaction already did the same thing.
+            db.rollback()
+            raise ValueError("already_blocked") from None
         return blk
     return existing
 
@@ -398,7 +413,11 @@ def mute_user(
 
     mute = Mute(muted_by=muter.id, target_id=target_id)
     db.add(mute)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("already_muted") from None
     return mute
 
 
@@ -431,7 +450,11 @@ def mute_post(db: Session, muter: User, post_id: int) -> Mute:
 
     mute = Mute(muted_by=muter.id, post_id=post_id)
     db.add(mute)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("already_muted") from None
     return mute
 
 

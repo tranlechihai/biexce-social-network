@@ -367,3 +367,52 @@ def feed_authors(
         users[author_id] = db.get(User, author_id)
         profiles[author_id] = db.get(UserProfile, author_id)
     return users, profiles
+
+
+def list_saved_posts(
+    db: Session,
+    user_id: int,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> tuple[list[Post], str | None]:
+    """One keyset page (newest saved first) of ``user_id``'s saved posts.
+
+    Returns ``(posts, next_cursor)``; ``next_cursor`` is ``None`` on the
+    last page.  Posts that no longer pass visibility checks (deleted,
+    audience, block) are skipped — the page is filled with visible posts
+    only, so the DB over-fetches a bounded amount to keep pages stable.
+    """
+    conditions = [SavedPost.user_id == user_id]
+    if cursor:
+        try:
+            created_at, row_id = decode_cursor(cursor)
+        except ValueError:
+            return [], None  # malformed cursor -> start over, never a 500
+        conditions.append(
+            or_(
+                SavedPost.created_at < created_at,
+                and_(SavedPost.created_at == created_at, SavedPost.id < row_id),
+            )
+        )
+    rows = db.scalars(
+        select(SavedPost)
+        .where(*conditions)
+        .order_by(SavedPost.created_at.desc(), SavedPost.id.desc())
+        .limit(limit * 2 + 4)
+    ).all()
+
+    posts: list[Post] = []
+    skipped = 0
+    last_row: SavedPost | None = None
+    for row in rows:
+        post = db.get(Post, row.post_id)
+        if post is None or not is_visible_to(post.author_id, user_id, post.audience, db):
+            skipped += 1
+            continue
+        posts.append(post)
+        last_row = row
+        if len(posts) == limit:
+            consumed = limit + skipped
+            next_cursor = encode_cursor(last_row) if consumed < len(rows) else None
+            return posts, next_cursor
+    return posts, None

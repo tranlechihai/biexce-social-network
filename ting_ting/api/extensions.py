@@ -1,6 +1,6 @@
 """REST API parity for profile, follows, activity, saved/repost, and media."""
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ from ting_ting.models import (
     Activity, Follow, Mute, Post, PostMedia, Repost, SavedPost, User,
     UserProfile,
 )
-from ting_ting.posts import is_visible_to
+from ting_ting.posts import is_visible_to, list_saved_posts as list_saved_posts_service
 from ting_ting.schemas import (
     ActivityResponse, ExtendedProfileResponse, ExtendedProfileUpdateRequest,
     PostMediaResponse, PostResponse, ToggleResponse, UserRef,
@@ -168,6 +168,10 @@ def mute_user_endpoint(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "conflict", "message": "Cannot mute yourself."},
             ) from None
+        if exc.args[0] == "already_muted":
+            # Lost a concurrent same-target mute race — the desired end
+            # state (muted) already holds, so converge to success.
+            return ToggleResponse(active=True)
         raise
 
     db.commit()
@@ -232,13 +236,33 @@ def list_activity(
     return visible[offset:offset + limit]
 
 
+NEXT_CURSOR_HEADER = "X-Next-Cursor"
+
+
 @feature_router.get("/saved", response_model=list[PostResponse])
 def list_saved_posts(
+    response: Response,
     limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, deprecated=True),
+    cursor: str | None = Query(default=None),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
+    """Saved posts, newest-first.
+
+    Pass the previous page's ``X-Next-Cursor`` header as ``cursor`` for
+    keyset pagination (T-022 — no full-table fetch). ``offset`` remains for
+    old clients and forces the legacy offset walk of the first page.
+    """
+    if cursor or offset == 0:
+        posts, next_cursor = list_saved_posts_service(
+            db, me.id, limit=limit, cursor=cursor,
+        )
+        if next_cursor is not None:
+            response.headers[NEXT_CURSOR_HEADER] = next_cursor
+        return [_post_response(db, post, viewer_id=me.id) for post in posts]
+
+    # Legacy offset walk (kept for old clients).
     rows = db.scalars(
         select(SavedPost).where(SavedPost.user_id == me.id)
         .order_by(SavedPost.created_at.desc(), SavedPost.id.desc())

@@ -14,12 +14,14 @@ Endpoints (moderator-level, 403 for non-moderators):
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ting_ting import moderation
 from ting_ting.auth import get_current_user
 from ting_ting.database import get_db
-from ting_ting.models import Comment, Post, Report, User
+from ting_ting.media import delete_stored_file
+from ting_ting.models import Comment, Post, PostMedia, Report, User
 from ting_ting.posts import is_visible_to
 from ting_ting.schemas import ReportCreateRequest, ReportResponse
 
@@ -313,10 +315,20 @@ def mod_delete_post(
     db: Session = Depends(get_db),
     me: User = Depends(get_moderator_role),
 ):
-    """Remove a post as a moderation action (author check bypassed)."""
+    """Remove a post as a moderation action (author check bypassed).
+
+    Media files are cleaned up too (T-022) — same convention as the
+    author delete path: collect paths, commit the row deletion, then
+    unlink so a failed commit never leaves missing files.
+    """
     post = _find_post(db, post_id)
+    media_paths = list(
+        db.scalars(select(PostMedia.path).where(PostMedia.post_id == post.id)).all()
+    )
     moderation.delete_post_moderation(db, post)
     db.commit()
+    for path in media_paths:
+        delete_stored_file(path)
     return {"message": "Post removed."}
 
 

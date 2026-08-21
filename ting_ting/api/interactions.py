@@ -237,18 +237,22 @@ def list_comments_endpoint(
     post = _find_post(db, post_id)
     _require_post_visible(db, post, me.id)
 
-    all_comments = interactions.list_comments(db, post_id)
-    if cursor:
-        try:
-            created_at, row_id = decode_cursor(cursor)
-            all_comments = [
-                c for c in all_comments
-                if (c.created_at, c.id) > (created_at, row_id)
-            ]
-        except ValueError:
-            pass  # malformed cursor → start over, never a 500
-    if offset:
-        all_comments = all_comments[offset:]
+    if cursor or offset == 0:
+        # Keyset path (T-022): one bounded SQL page, oldest-first.
+        after = None
+        if cursor:
+            try:
+                after = decode_cursor(cursor)
+            except ValueError:
+                after = None  # malformed cursor → start over, never a 500
+        rows = interactions.list_comments(db, post_id, limit=limit + 1, after=after)
+        page = rows[:limit]
+        if len(rows) > limit and page:
+            response.headers[NEXT_CURSOR_HEADER] = encode_cursor(page[-1])
+        return [_comment_response(db, c) for c in page]
+
+    # Legacy offset walk (kept for old clients).
+    all_comments = interactions.list_comments(db, post_id)[offset:]
     page = all_comments[:limit]
     if len(all_comments) > limit:
         response.headers[NEXT_CURSOR_HEADER] = encode_cursor(page[-1])

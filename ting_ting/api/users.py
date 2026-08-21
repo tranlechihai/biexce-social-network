@@ -13,10 +13,11 @@ redacted fields on the public profile itself.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ting_ting import social
+from ting_ting.keyset import decode_cursor, encode_cursor
 from ting_ting.auth import get_current_user
 from ting_ting.database import get_db
 from ting_ting.models import Follow, User, UserProfile
@@ -132,7 +133,13 @@ def get_public_user(
 
 
 def _followers_or_404(
-    db: Session, me: User, username: str, direction: str,
+    db: Session,
+    me: User,
+    username: str,
+    direction: str,
+    limit: int | None = None,
+    cursor: str | None = None,
+    response: Response | None = None,
 ) -> list[UserRef]:
     target = _find_by_username(db, username)
     if social.is_blocked(db, me.id, target.id):
@@ -141,19 +148,37 @@ def _followers_or_404(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_found", "message": "User not found."},
         )
-    query = (
-        select(Follow)
-        .where(
-            Follow.followed_id == target.id
-            if direction == "followers"
-            else Follow.follower_id == target.id
-        )
-        .order_by(Follow.created_at.desc(), Follow.id.desc())
+    query = select(Follow).where(
+        Follow.followed_id == target.id
+        if direction == "followers"
+        else Follow.follower_id == target.id
     )
-    rows = db.scalars(query).all()
+    if cursor:
+        try:
+            created_at, row_id = decode_cursor(cursor)
+        except ValueError:
+            cursor = None  # malformed cursor → start over, never a 500
+        if cursor:
+            query = query.where(
+                or_(
+                    Follow.created_at < created_at,
+                    and_(Follow.created_at == created_at, Follow.id < row_id),
+                )
+            )
+    # Bounded over-fetch keeps pages full even when rows are skipped
+    # (deleted/banned/blocked accounts); without a limit we return the
+    # whole visible graph, as before.
+    if limit is not None:
+        query = query.limit(limit * 2 + 4)
+    rows = db.scalars(
+        query.order_by(Follow.created_at.desc(), Follow.id.desc())
+    ).all()
     other_column = "follower_id" if direction == "followers" else "followed_id"
-    results = []
+    results: list[UserRef] = []
+    consumed = 0
+    last_row: Follow | None = None
     for row in rows:
+        consumed += 1
         user = db.get(User, getattr(row, other_column))
         if (
             user is not None
@@ -161,25 +186,45 @@ def _followers_or_404(
             and not social.is_blocked(db, me.id, user.id)
         ):
             results.append(_user_ref(user))
+            last_row = row
+            if limit is not None and len(results) == limit:
+                if consumed < len(rows) and response is not None:
+                    response.headers[NEXT_CURSOR_HEADER] = encode_cursor(last_row)
+                db.commit()
+                return results
     db.commit()
     return results
 
 
 @router.get("/{username}/followers", response_model=list[UserRef])
 def get_user_followers(
+    response: Response,
     username: str,
+    limit: int | None = Query(default=None, ge=FEED_LIMIT_MIN, le=FEED_LIMIT_MAX),
+    cursor: str | None = Query(default=None),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    """Who follows the user — 404 for blocked pairs."""
-    return _followers_or_404(db, me, username, "followers")
+    """Who follows the user — 404 for blocked pairs.
+
+    Optional keyset pagination (T-022): pass ``limit`` and feed the
+    ``X-Next-Cursor`` response header back as ``cursor``.
+    """
+    return _followers_or_404(db, me, username, "followers", limit, cursor, response)
 
 
 @router.get("/{username}/following", response_model=list[UserRef])
 def get_user_following(
+    response: Response,
     username: str,
+    limit: int | None = Query(default=None, ge=FEED_LIMIT_MIN, le=FEED_LIMIT_MAX),
+    cursor: str | None = Query(default=None),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
-    """Who the user follows — 404 for blocked pairs."""
-    return _followers_or_404(db, me, username, "following")
+    """Who the user follows — 404 for blocked pairs.
+
+    Optional keyset pagination (T-022): pass ``limit`` and feed the
+    ``X-Next-Cursor`` response header back as ``cursor``.
+    """
+    return _followers_or_404(db, me, username, "following", limit, cursor, response)

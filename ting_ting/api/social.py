@@ -295,6 +295,12 @@ def block_target(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "conflict", "message": "Cannot block yourself."},
             ) from None
+        if exc.args[0] == "already_blocked":
+            # Lost a concurrent same-pair block race — the pair IS blocked.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "conflict", "message": "You have already blocked this user."},
+            ) from None
         raise
 
     db.commit()

@@ -37,20 +37,49 @@ from ting_ting.config import Settings
 from ting_ting.models import Base
 
 
-def enable_sqlite_foreign_keys(engine: Engine) -> None:
-    """Enforce FK constraints on *every* new SQLite connection in the pool.
+def enable_sqlite_runtime_pragmas(
+    engine: Engine,
+    enforce_foreign_keys: bool = True,
+) -> None:
+    """Apply the runtime PRAGMA set to *every* new SQLite connection.
 
-    SQLite ships with ``foreign_keys`` OFF per connection, so a one-shot
-    PRAGMA only covers a single connection.  This listener guarantees all
-    pooled connections cascade deletes correctly.
+    SQLite pragmas are per-connection unless documented otherwise, so a
+    one-shot statement only covers a single connection.  This listener
+    guarantees every pooled connection gets:
+
+    * ``journal_mode=WAL`` — the WAL state is persisted in the database
+      file, so the setting itself is cheap to re-assert; WAL lets readers
+      proceed while a writer holds the write lock (no ``database is
+      locked`` on the 1-worker + alembic/backup overlap we actually have).
+      In-memory databases no-op back to memory journal.
+    * ``synchronous=NORMAL`` — the recommended companion to WAL (full
+      durability on commit, crash-safe with WAL);
+    * ``busy_timeout=5000`` — brief writer/readers contention retries
+      instead of failing immediately.
+    * ``foreign_keys=ON`` (when ``enforce_foreign_keys``) — cascade deletes
+      always work. **Migrations must pass ``enforce_foreign_keys=False``**:
+      with it ON, a ``DROP TABLE`` on a parent cascades to every child table
+      (SQLite treats DROP TABLE as DELETE of all rows), which silently wipes
+      dependent rows during a table rebuild.  FK enforcement is an
+      app-runtime concern, not a schema-change one.
     """
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         if hasattr(cursor, "execute"):
-            cursor.execute("PRAGMA foreign_keys=ON")
+            if enforce_foreign_keys:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            mode_row = cursor.fetchone()
+            if mode_row and str(mode_row[0]).lower() == "wal":
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
+
+
+# Backwards-compatible alias (pre-T-022 name).
+enable_sqlite_foreign_keys = enable_sqlite_runtime_pragmas
 
 # ---------------------------------------------------------------------------
 # Engine / session

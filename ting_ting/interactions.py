@@ -10,7 +10,9 @@ Idempotency is guaranteed by database-level UNIQUE constraints:
 """
 
 
-from sqlalchemy import func, select
+from datetime import datetime
+
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import instance_state
@@ -165,15 +167,30 @@ def edit_comment(db: Session, comment: Comment, by_user_id: int, content: str) -
     return comment
 
 
-def list_comments(db: Session, post_id: int) -> list[Comment]:
-    """Return comments ordered oldest-first, then by id ascending for stability."""
-    return list(
-        db.execute(
-            select(Comment)
-            .where(Comment.post_id == post_id)
-            .order_by(Comment.created_at.asc(), Comment.id.asc())
-        ).scalars().all()
-    )
+def list_comments(
+    db: Session,
+    post_id: int,
+    limit: int | None = None,
+    after: tuple[datetime, int] | None = None,
+) -> list[Comment]:
+    """Return comments ordered oldest-first, then by id ascending.
+
+    ``after`` is a keyset cursor ``(created_at, id)`` and ``limit`` caps how
+    many rows are fetched starting past it (T-022 — callers that do not pass
+    either still get the full ordered list, as the web view needs).
+    """
+    stmt = select(Comment).where(Comment.post_id == post_id)
+    if after is not None:
+        stmt = stmt.where(
+            or_(
+                Comment.created_at > after[0],
+                and_(Comment.created_at == after[0], Comment.id > after[1]),
+            )
+        )
+    stmt = stmt.order_by(Comment.created_at.asc(), Comment.id.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt).all())
 
 
 def count_comments(db: Session, post_id: int) -> int:
