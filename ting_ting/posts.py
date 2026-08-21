@@ -33,6 +33,9 @@ def is_visible_to(author_id: int, viewer_id: int, audience: str, db: Session) ->
 
     Post access rules (re-evaluated on every read):
     * Author always sees their own post.
+    * Suppressed authors (banned or self-deactivated) — denied for everyone
+      else: their content leaves every feed, so a direct post id must not be
+      a backdoor around feed suppression (404 keeps existence non-leaking).
     * ``ONLY_ME`` — author only.
     * ``FRIENDS`` — author + current mutual unblocked friends.
     * ``PUBLIC`` — every non-blocked viewer.
@@ -41,6 +44,16 @@ def is_visible_to(author_id: int, viewer_id: int, audience: str, db: Session) ->
     # Author always sees own posts.
     if viewer_id == author_id:
         return True
+
+    # Suppressed authors: banned (moderator) or self-deactivated (T-023).
+    # A missing author is denied as well — fail closed.
+    author = db.get(User, author_id)
+    if (
+        author is None
+        or author.banned_at is not None
+        or author.deactivated_at is not None
+    ):
+        return False
 
     # Blocked pair → denied regardless of audience.
     if social.is_blocked(db, author_id, viewer_id):

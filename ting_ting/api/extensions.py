@@ -121,6 +121,12 @@ def follow_user(
             ))
             if existing is None:
                 raise
+        else:
+            # Commit the outer transaction explicitly.  Close-time handling of
+            # the autobegun transaction is dialect-dependent (SQLite happens to
+            # keep the rows; PostgreSQL rolls them back), so the web route's
+            # ``else: db.commit()`` pattern is the safe one to mirror here.
+            db.commit()
     return ToggleResponse(active=True)
 
 

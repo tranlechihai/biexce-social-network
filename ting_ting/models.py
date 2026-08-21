@@ -462,12 +462,26 @@ class Report(Base):
 
     # A report pins at most two content rows: a post report sets post_id only,
     # a comment report sets comment_id (and its anchoring post_id), and a bare
-    # account report sets neither.  The unique constraint below keeps one row
-    # per (reporter, target, content).
+    # account report sets neither.  The functional unique index below keeps one
+    # row per (reporter, target, content).
+    #
+    # COALESCE applies to comment_id only (not post_id): a post report's
+    # comment_id is NULL, and a plain unique constraint treats NULLs as
+    # distinct, so racing post-report inserts would otherwise duplicate.  But
+    # post_id must stay raw — when a moderator deletes a post, the FK SET NULL
+    # turns an anchored report into (reporter, target, NULL, 0), and a fully
+    # COALESCEd index would make that row collide with an existing bare
+    # account report (NULL != 0, so a raw post_id can never collide).
     __tablename__ = "reports"
     __table_args__ = (
-        UniqueConstraint("reporter_id", "target_user_id", "post_id", "comment_id",
-                         name="uq_report_target"),
+        Index(
+            "ux_reports_dedup",
+            "reporter_id",
+            "target_user_id",
+            "post_id",
+            text("coalesce(comment_id, 0)"),
+            unique=True,
+        ),
         CheckConstraint(
             "reason IN ('spam','harassment','hate_speech','false_info','other')",
             name="ck_report_reason",

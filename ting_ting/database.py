@@ -327,10 +327,13 @@ def validate_and_initialize_schema(
         # auto-downgrades and never stamps an unmanaged database. Fresh empty
         # databases and stamped-but-behind databases get upgraded; anything
         # else (tables without an alembic_version stamp) is fail-closed.
+        upgraded = False
         if "alembic_version" in existing_tables:
             _alembic_upgrade_head(engine)
+            upgraded = True
         elif not existing_tables:
             _alembic_upgrade_head(engine)
+            upgraded = True
         else:
             raise ValueError(
                 "PostgreSQL database contains tables but no alembic_version "
@@ -338,6 +341,11 @@ def validate_and_initialize_schema(
                 "Refusing to start; run 'alembic upgrade head' or point the "
                 "app at the correct database."
             )
+        # The table snapshot above predates the upgrade (a no-op when the DB
+        # is already at head, but the full table list when it just ran);
+        # re-inspect before deciding what is missing.
+        if upgraded:
+            existing_tables = set(inspect(engine).get_table_names())
         expected_tables = set(Base.metadata.tables)
         missing_tables = expected_tables - existing_tables
         if missing_tables:

@@ -158,6 +158,29 @@ class TestDeactivation:
         prof = fan.get("/api/users/t23_deact3").json()
         assert prof["follower_count"] is not None
 
+    def test_deactivated_posts_hidden_from_direct_read(self, client, tmp_engine):
+        """Like the feed, a direct post id must not bypass suppression:
+        after deactivation the post 404s for third parties, while the owner
+        (sign-in is not blocked) can still read their own post."""
+        c = TestClient(_app())
+        _login(c, "t23_deact5")
+        pid = _post(c, "direct read check")
+        fan = TestClient(_app())
+        _login(fan, "t23_deact5_fan")
+        assert fan.get(f"/api/posts/{pid}").status_code == 200
+
+        resp = _mutate(c, "POST", "/api/account/deactivate", json={"password": "securepass1"})
+        assert resp.status_code == 200, resp.text
+
+        assert fan.get(f"/api/posts/{pid}").status_code == 404
+
+        c2 = TestClient(_app())
+        assert c2.post(
+            "/api/auth/login",
+            json={"identifier": "t23_deact5", "password": "securepass1"},
+        ).status_code == 200
+        assert c2.get(f"/api/posts/{pid}").status_code == 200
+
 
 class TestWebAccount:
     def test_web_account_page_and_download(self, client, tmp_engine):

@@ -142,6 +142,17 @@ def create_report(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "not_found", "message": "Post not found."},
             )
+        # A pure post report is anchored to the post's author; a client-
+        # supplied target must agree (mirrors the comment rule above).
+        # Without this, a reporter could pin reports onto arbitrary accounts.
+        if comment_id is None and body.target_user_id != post.author_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "validation",
+                    "message": "The report target must be the post author.",
+                },
+            )
 
     try:
         report = moderation.create_report(

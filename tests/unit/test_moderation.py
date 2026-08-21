@@ -107,6 +107,86 @@ class TestCreateReport:
                 reason="spam", comment_id=comment.id, post_id=None,
             )
 
+    def test_concurrent_report_conflict_converges_to_winner(self, tmp_db_path):
+        """Deterministic real-DB conflict via a begin_nested hook (same
+        pattern as the create_like conflict test): the winning report row is
+        committed through a separate connection just before the contender's
+        savepoint opens, so the contender's initial SELECT sees nothing, its
+        real flush hits the actual ux_reports_dedup unique index, and
+        ``create_report`` converges to the winner instead of raising.
+        """
+        from datetime import datetime, timezone
+        from unittest import mock
+
+        from sqlalchemy import text
+        from sqlalchemy.orm import sessionmaker
+
+        from ting_ting.database import _create_test_engine, _init_test_engine
+
+        engine = _create_test_engine(tmp_db_path)
+        _init_test_engine(engine)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+        with factory() as sess:
+            reporter = User(
+                username="race_rpt", email="race_rpt@x.com",
+                password_hash=hash_password("pw12345678"),
+            )
+            target = User(
+                username="race_tgt", email="race_tgt@x.com",
+                password_hash=hash_password("pw12345678"),
+            )
+            sess.add_all([reporter, target])
+            sess.flush()
+            post = Post(author_id=target.id, content="raced post",
+                        audience="PUBLIC")
+            sess.add(post)
+            sess.commit()
+            reporter_id, target_id, post_id = reporter.id, target.id, post.id
+
+        with factory() as sess:
+            original_begin_nested = sess.begin_nested
+            conflict_injected = [False]
+
+            def patched_begin_nested():
+                if not conflict_injected[0]:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "INSERT INTO reports "
+                            "(reporter_id, target_user_id, post_id,"
+                            " comment_id, reason, status, created_at) "
+                            "VALUES (:rid, :tid, :pid, NULL, 'spam',"
+                            " 'pending', :ts)"
+                        ), {
+                            "rid": reporter_id,
+                            "tid": target_id,
+                            "pid": post_id,
+                            "ts": datetime.now(timezone.utc),
+                        })
+                    conflict_injected[0] = True
+                return original_begin_nested()
+
+            with mock.patch.object(
+                sess, "begin_nested", side_effect=patched_begin_nested,
+            ):
+                with sess.no_autoflush:
+                    row = moderation.create_report(
+                        sess, reporter, target_id, reason="spam",
+                        post_id=post_id,
+                    )
+
+            # Converged to the winner's row; exactly one report exists.
+            assert row is not None, "recovery did not find the winner row"
+            assert row.reporter_id == reporter_id
+        with engine.connect() as conn:
+            cnt = conn.execute(
+                text("SELECT COUNT(*) FROM reports WHERE post_id = :pid"),
+                {"pid": post_id},
+            ).scalar()
+        assert cnt == 1, f"Expected 1 report row, got {cnt}"
+
+        engine.dispose()
+
 
 # ---------------------------------------------------------------------------
 # resolve_report

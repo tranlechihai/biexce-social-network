@@ -190,10 +190,12 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
         s.flush()
         s.add(UserProfile(user_id=alice.id, location="Hanoi"))
         # Explicit large id: proves sequence re-anchoring past copied IDs.
+        # is_moderator is NOT NULL without a DB default (Python-side default only),
+# so the raw SQL must provide it.
         s.execute(
             text(
-                "INSERT INTO users (id, username, email, password_hash) "
-                "VALUES (9001, 'gap', 'gap@example.com', :ph)"
+                "INSERT INTO users (id, username, email, password_hash, is_moderator) "
+                "VALUES (9001, 'gap', 'gap@example.com', :ph, 0)"
             ),
             {"ph": hash_password("whatever1")},
         )
@@ -237,7 +239,7 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
                 "FROM users u "
                 "JOIN posts p ON p.author_id = u.id "
                 "JOIN comments c ON c.post_id = p.id "
-                "WHERE u.username = 'alice'"
+                "WHERE u.username = 'alice' AND c.content = 'child'"
             )
         ).one()
     assert row[1] == "alice" and row[2] == "hello pg"
@@ -318,7 +320,7 @@ def test_api_smoke_on_postgres(pg_engine):
 
         login = client.post(
             "/api/v1/auth/login",
-            json={"username": "pguser", "password": "password123"},
+            json={"identifier": "pguser", "password": "password123"},
             follow_redirects=False,
         )
         assert login.status_code == 200, login.text
@@ -335,6 +337,32 @@ def test_api_smoke_on_postgres(pg_engine):
         feed = client.get("/api/v1/feed", follow_redirects=False)
         assert feed.status_code == 200, feed.text
         assert any(item.get("id") == post_id for item in feed.json())
+
+        # A follow must persist across requests (commit semantics hold on PG).
+        stranger = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "pgstranger",
+                "email": "pgstranger@example.com",
+                "password": "password123",
+            },
+            follow_redirects=False,
+        )
+        assert stranger.status_code in {200, 201}, stranger.text
+        stranger_id = stranger.json()["id"]
+
+        followed = client.put(
+            f"/api/v1/social/follows/{stranger_id}", follow_redirects=False
+        )
+        assert followed.status_code == 200, followed.text
+        assert followed.json()["active"] is True
+
+        following = client.get("/api/v1/social/following", follow_redirects=False)
+        assert following.status_code == 200, following.text
+        assert any(u["id"] == stranger_id for u in following.json())
+        with pg_engine.connect() as conn:
+            follow_rows = conn.execute(text("SELECT COUNT(*) FROM follows")).scalar_one()
+        assert follow_rows >= 1
 
         ready = client.get("/ready")
         assert ready.status_code == 200 and ready.json()["database"] == "ok"

@@ -92,6 +92,50 @@ class TestReportFiling:
         assert second.status_code == status.HTTP_201_CREATED
         assert first.json()["id"] == second.json()["id"]
 
+    def test_report_post_must_target_post_author(self, client):
+        """A post report's target is pinned to the post's author; pointing it
+        at an unrelated account is rejected (client-provided targets are not
+        trusted for content reports)."""
+        _a = _M.register(client, "pa_a")
+        b = _M.register(client, "pa_b")
+        c = _M.register(client, "pa_c")
+        _M.login(client, "pa_b")
+        post = _M.create_post(client, "authored by b")
+        _M.login(client, "pa_a")
+        wrong = client.post("/api/reports", json={
+            "target_user_id": c, "post_id": post["id"], "reason": "spam",
+        })
+        assert wrong.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert wrong.json()["error"]["code"] == "validation"
+
+        right = client.post("/api/reports", json={
+            "target_user_id": b, "post_id": post["id"], "reason": "spam",
+        })
+        assert right.status_code == status.HTTP_201_CREATED, right.text
+
+    def test_post_delete_not_blocked_by_bare_report(self, client, db_session):
+        """Deleting a post sets the anchored report's post_id to NULL via the
+        FK; that must not violate ux_reports_dedup even when the same
+        reporter also holds a bare account report on the same target (the
+        raw-NULL post_id keeps the two rows apart — a fully COALESCEd index
+        would collide them and wedge the deletion forever)."""
+        _a = _M.register(client, "wedge_a")
+        b = _M.register(client, "wedge_b")
+        mod = _M.register(client, "wedge_mod")
+        _M.make_moderator(db_session, mod)
+        _M.login(client, "wedge_b")
+        post = _M.create_post(client, "will be removed")
+        _M.login(client, "wedge_a")
+        assert client.post("/api/reports", json={
+            "target_user_id": b, "post_id": post["id"], "reason": "spam",
+        }).status_code == 201
+        assert client.post("/api/reports", json={
+            "target_user_id": b, "reason": "other",
+        }).status_code == 201
+        _M.login(client, "wedge_mod")
+        resp = client.delete(f"/api/mod/posts/{post['id']}")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
     def test_report_invisible_post_404(self, client):
         _a, b = _M.register(client, "inv_a"), _M.register(client, "inv_b")
         _M.login(client, "inv_b")
@@ -293,6 +337,23 @@ class TestBan:
         _M.login(client, "feed_by")
         feed = client.get("/api/feed").json()
         assert all(p["author_id"] != target for p in feed)
+
+    def test_banned_posts_hidden_from_direct_read(self, client, db_session):
+        """Feed suppression must not be bypassable via a direct post id: a
+        banned author's posts 404 for third parties (and their comment
+        threads too), not just disappear from feeds."""
+        mod, target = self._setup(client, db_session, "dread")
+        _M.login(client, "dread_tgt")
+        post = _M.create_post(client, "still here?")
+        _M.login(client, "dread_mod")
+        assert _ban(client, target).status_code == 200
+
+        _fan = _M.register(client, "dread_fan")
+        _M.login(client, "dread_fan")
+        assert client.get(f"/api/posts/{post['id']}").status_code == 404
+        assert client.get(
+            f"/api/posts/{post['id']}/comments"
+        ).status_code == 404
 
     def test_unban_idempotent(self, client, db_session):
         mod, target = self._setup(client, db_session, "uidem")

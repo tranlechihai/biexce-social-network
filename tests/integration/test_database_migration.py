@@ -8,7 +8,7 @@ import os
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, func, inspect, select
+from sqlalchemy import create_engine, func, inspect, select, text
 
 from ting_ting.migrate_data import copy_database
 from ting_ting.models import (
@@ -279,3 +279,173 @@ def test_0007_upgrade_fails_closed_on_orphan_posts(tmp_path: Path):
         assert fks and all(r[6] != "CASCADE" for r in fks)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# 0012 — NULL-safe report dedup (reports rebuild on SQLite)
+# ---------------------------------------------------------------------------
+
+def _seed_reports_at_0011(url: str, db_path: Path) -> tuple[int, int, int]:
+    """Upgrade to 0011 (legacy ``uq_report_target`` shape) and seed:
+    3 reports (bare, anchored-post, anchored-comment) + 1 duplicate of the
+    anchored-post report that the legacy 4-column constraint LEGALLY admits
+    (NULL comment_id), proving the gap 0012 closes.
+    """
+    _run(url, "upgrade", "20260821_0011")
+    now = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    now_sql = now.isoformat(sep=" ")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as c:
+            c.execute(User.__table__.insert(), [
+                {"id": 1, "username": "rep_a", "email": "ra@x.com",
+                 "password_hash": "h"},
+                {"id": 2, "username": "rep_b", "email": "rb@x.com",
+                 "password_hash": "h"},
+                {"id": 3, "username": "rep_c", "email": "rc@x.com",
+                 "password_hash": "h"},
+            ])
+            c.execute(Post.__table__.insert(), [{
+                "id": 7, "author_id": 2, "content": "seed post",
+                "audience": "PUBLIC", "created_at": now, "updated_at": now,
+            }])
+            c.execute(Comment.__table__.insert(), [{
+                "id": 9, "post_id": 7, "author_id": 3,
+                "content": "seed comment", "created_at": now,
+            }])
+            c.execute(
+                text(
+                    f"""
+                    INSERT INTO reports (id, reporter_id, target_user_id,
+                                         post_id, comment_id, reason,
+                                         status, created_at)
+                    VALUES
+                      (1, 1, 2, NULL, NULL, 'spam', 'pending', '{now_sql}'),
+                      (2, 1, 2, 7, NULL, 'harassment', 'pending', '{now_sql}'),
+                      (3, 1, 3, 7, 9, 'other', 'pending', '{now_sql}')
+                    """
+                )
+            )
+            # The legacy constraint admits this duplicate (comment_id NULL).
+            c.execute(
+                text(
+                    f"""
+                    INSERT INTO reports (id, reporter_id, target_user_id,
+                                         post_id, comment_id, reason,
+                                         status, created_at)
+                    VALUES (4, 1, 2, 7, NULL, 'spam', 'pending', '{now_sql}')
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+    return 7, 2, 1  # post_id, target_id, reporter_id
+
+
+def test_0012_sqlite_rebuild_and_dedup_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "dedup.db"
+    url = f"sqlite:///{db_path}"
+    post_id, target_id, reporter_id = _seed_reports_at_0011(url, db_path)
+
+    # The seeded legacy duplicate (row 4) blocks the index: the upgrade must
+    # fail CLOSED with a clear error and leave the database untouched.
+    with pytest.raises(ValueError, match="ux_reports_dedup"):
+        _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0] == "20260821_0011"
+        # Failure left everything in place (transactional DDL rolled back).
+        assert con.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 4
+    finally:
+        con.close()
+
+    # Resolve the duplicate, then upgrade to head (0012): rebuild reports.
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("DELETE FROM reports WHERE id = 4")
+        con.commit()
+    finally:
+        con.close()
+    _upgrade(url)
+
+    con = sqlite3.connect(db_path)
+    try:
+        # The 3 surviving rows made it through the rebuild.
+        assert con.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 3
+        # Inline unique constraint gone from the table DDL...
+        ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='reports'"
+        ).fetchone()[0]
+        assert "uq_report_target" not in ddl
+        # ...and the functional index is present.
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='reports'"
+        ).fetchall()}
+        assert "ux_reports_dedup" in names, names
+    finally:
+        con.close()
+
+    # The functional index rejects the duplicate the legacy constraint allowed.
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            f"""
+            INSERT INTO reports (reporter_id, target_user_id, post_id,
+                                 comment_id, reason, status, created_at)
+            VALUES ({reporter_id}, {target_id}, {post_id}, NULL, 'spam',
+                    'pending', '{datetime.now(timezone.utc).isoformat(sep=' ')}')
+            """
+        )
+        con.commit()
+        raise AssertionError("duplicate post report was accepted after 0012")
+    except sqlite3.IntegrityError:
+        pass
+    finally:
+        con.close()
+
+    # Wedge guard: deleting the post SET-NULLs the anchored report's post_id
+    # (and the comment's deletion SET-NULLs comment_id) — that must NOT
+    # collide with the bare report of the same (reporter, target).
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        con.commit()
+        rows = con.execute(
+            "SELECT post_id, comment_id FROM reports WHERE reporter_id = 1"
+            " ORDER BY id"
+        ).fetchall()
+        assert rows, "reports missing after post delete"
+        assert all(r[0] is None and r[1] is None for r in rows), rows
+    finally:
+        con.close()
+
+    # Downgrade restores the legacy UNIQUE and keeps every row.
+    _run(url, "downgrade", "20260821_0011")
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 3
+        ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='reports'"
+        ).fetchone()[0]
+        assert "uq_report_target" in ddl
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='reports'"
+        ).fetchall()}
+        assert "ux_reports_dedup" not in names, names
+    finally:
+        con.close()
+
+    # ...and re-upgrade returns to the 0012 shape.
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 3
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='reports'"
+        ).fetchall()}
+        assert "ux_reports_dedup" in names, names
+    finally:
+        con.close()

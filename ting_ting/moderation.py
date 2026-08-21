@@ -17,6 +17,7 @@ Rules:
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ting_ting.models import (
@@ -77,26 +78,45 @@ def create_report(
     if comment_id is not None and post_id is None:
         raise ValueError("content_requires_post")
 
-    existing = db.execute(
-        select(Report).where(
-            Report.reporter_id == reporter.id,
-            Report.target_user_id == target_user_id,
-            Report.post_id == post_id,
-            Report.comment_id == comment_id,
-        )
-    ).scalar_one_or_none()
+    predicate = (
+        Report.reporter_id == reporter.id,
+        Report.target_user_id == target_user_id,
+        Report.post_id == post_id,
+        Report.comment_id == comment_id,
+    )
+    existing = db.execute(select(Report).where(*predicate)).scalar_one_or_none()
     if existing is not None:
         return existing
 
-    report = Report(
-        reporter_id=reporter.id,
-        target_user_id=target_user_id,
-        post_id=post_id,
-        comment_id=comment_id,
-        reason=reason,
-    )
-    db.add(report)
-    db.flush()
+    # A racing request can insert the same report between the check above and
+    # our flush; the NULL-safe index (ux_reports_dedup, migration 0012)
+    # rejects the duplicate as an IntegrityError.  The savepoint rolls back
+    # only our rows, then we converge to the winner's row — the same pattern
+    # as the follow toggle.  (Racing *bare account* reports keep NULL
+    # post_ids, which SQL treats as distinct; those duplicates are accepted
+    # by design — see the 0012 docstring.)
+    report = None
+    try:
+        with db.begin_nested():
+            report = Report(
+                reporter_id=reporter.id,
+                target_user_id=target_user_id,
+                post_id=post_id,
+                comment_id=comment_id,
+                reason=reason,
+            )
+            db.add(report)
+            db.flush()
+    except IntegrityError:
+        from sqlalchemy.orm.attributes import instance_state
+        if report is not None and instance_state(report).session_id is not None:
+            db.expunge(report)
+        existing = db.execute(
+            select(Report).where(*predicate)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        raise
     return report
 
 
