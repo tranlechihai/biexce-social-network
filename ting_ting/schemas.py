@@ -69,6 +69,12 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class AvatarUploadResponse(BaseModel):
+    """Result of an avatar upload (T-025 mobile profile/media API)."""
+
+    avatar_url: str
+
+
 class UserResponse(BaseModel):
     """Non-sensitive public user representation — never exposes password or token."""
 

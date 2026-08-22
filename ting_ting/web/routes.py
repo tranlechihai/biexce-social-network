@@ -43,7 +43,6 @@ from ting_ting.social import (
     relationship_state,
 )
 from ting_ting.posts import is_visible_to
-from ting_ting.uploads import AVATAR_MAX as AVATAR_UPLOAD_MAX
 from ting_ting.uploads import UploadRejected
 from ting_ting.schemas import (
     POST_CONTENT_MAX,
@@ -635,7 +634,6 @@ async def create_post_submit(
         )
 
     post = create_post_service(db, me.id, content, audience)
-    from ting_ting.uploads import UploadRejected
 
     try:
         media = await _store_post_media(form.get("media_file"), me.id)
@@ -974,35 +972,13 @@ async def update_profile_submit(
 async def _validate_and_store_avatar(db: Session, me: User, upload) -> tuple[str | None, str | None]:
     """Shared avatar ingest: validate, scan, quota-check, store, commit.
 
-    Returns ``(new_path, old_path)`` on success or ``(None, error_code)``
-    when rejected — nothing is stored in that case.
+    Delegates to ``uploads.ingest_avatar`` (T-025) — the single source of
+    truth also used by ``POST /api/profile/avatar``.  Returns
+    ``(new_path, old_path)`` on success or ``(None, error_code)``.
     """
-    from ting_ting.config import get_settings
-    from ting_ting.media import UPLOADS_DIR
-    from ting_ting.uploads import check_upload_quota, validate_upload_bytes
+    from ting_ting.uploads import ingest_avatar
 
-    data = await upload.read(AVATAR_UPLOAD_MAX + 1)
-    try:
-        check_upload_quota(UPLOADS_DIR, me.id, len(data) if data else 0, get_settings())
-        suffix, _media_type = validate_upload_bytes(data, AVATAR_UPLOAD_MAX, allow_video=False)
-    except UploadRejected as exc:
-        return None, exc.code
-    profile = db.get(UserProfile, me.id) or UserProfile(user_id=me.id)
-    db.add(profile)
-    old_path = profile.avatar_path
-    UPLOADS_DIR.mkdir(exist_ok=True)
-    filename = f"avatar-{me.id}-{uuid4().hex}{suffix}"
-    (UPLOADS_DIR / filename).write_bytes(data)
-    profile.avatar_path = f"/media/{filename}"
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        delete_stored_file(profile.avatar_path)
-        raise
-    if old_path and old_path != profile.avatar_path:
-        delete_stored_file(old_path)
-    return profile.avatar_path, None
+    return await ingest_avatar(db, me, upload)
 
 
 UPLOAD_ERROR_MESSAGES = {

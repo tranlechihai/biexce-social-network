@@ -15,6 +15,7 @@ Quota settings: ``TING_UPLOAD_QUOTA_MB`` (per user, default 512),
 """
 
 from pathlib import Path
+from uuid import uuid4
 
 MAX_POST_MEDIA = 25 * 1024 * 1024
 AVATAR_MAX = 2 * 1024 * 1024
@@ -127,3 +128,40 @@ def check_upload_quota(
             "storage_full",
             "Server storage quota exceeded.",
         )
+
+
+async def ingest_avatar(db, user, upload) -> tuple[str | None, str | None]:
+    """Avatar ingest shared by the web form and the API (T-025): validate
+    the signature (images only), scan for dangerous content, quota-check,
+    store under a server-generated name and persist the profile row.
+
+    Returns ``(new_path, old_path)`` on success — the caller is responsible
+    for deleting the replaced file — or ``(None, error_code)`` when the
+    upload is rejected, in which case nothing is stored.
+    """
+    from ting_ting.config import get_settings
+    from ting_ting.media import UPLOADS_DIR, delete_stored_file
+    from ting_ting.models import UserProfile
+
+    data = await upload.read(AVATAR_MAX + 1)
+    try:
+        check_upload_quota(UPLOADS_DIR, user.id, len(data) if data else 0, get_settings())
+        suffix, _media_type = validate_upload_bytes(data, AVATAR_MAX, allow_video=False)
+    except UploadRejected as exc:
+        return None, exc.code
+    profile = db.get(UserProfile, user.id) or UserProfile(user_id=user.id)
+    db.add(profile)
+    old_path = profile.avatar_path
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    filename = f"avatar-{user.id}-{uuid4().hex}{suffix}"
+    (UPLOADS_DIR / filename).write_bytes(data)
+    profile.avatar_path = f"/media/{filename}"
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        delete_stored_file(profile.avatar_path)
+        raise
+    if old_path and old_path != profile.avatar_path:
+        delete_stored_file(old_path)
+    return profile.avatar_path, None

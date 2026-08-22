@@ -22,6 +22,7 @@ from ting_ting.auth import get_current_user
 from ting_ting.database import get_db
 from ting_ting.models import Follow, User, UserProfile
 from ting_ting.schemas import (
+    PostResponse,
     UserPublicResponse,
     UserRef,
     UserSearchItem,
@@ -250,3 +251,86 @@ def get_user_following(
     ``X-Next-Cursor`` response header back as ``cursor``.
     """
     return _followers_or_404(db, me, username, "following", limit, cursor, response)
+
+
+@router.get("/{username}/posts", response_model=list[PostResponse])
+def get_user_posts(
+    response: Response,
+    username: str,
+    limit: int = Query(default=FEED_LIMIT_DEFAULT, ge=FEED_LIMIT_MIN, le=FEED_LIMIT_MAX),
+    cursor: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """The user's posts that the viewer MAY see — keyset paginated (T-025).
+
+    Applies the same privacy matrix as feeds and direct reads, evaluated
+    once for the fixed (author, viewer) pair and filtered in SQL by
+    audience:
+
+    * unknown / banned / deactivated author, or a blocked pair → 404
+      (no existence or content leaks);
+    * the owner always sees their own profile in full;
+    * a PRIVATE author's PUBLIC posts are visible to friends and ACTIVE
+      followers only — pending follow requests see nothing;
+    * FOLLOWERS posts go to active followers; FRIENDS posts to accepted
+      friends; ONLY_ME never appears in another user's profile.
+
+    Pagination: stable (created_at, id) keyset cursor — feed
+    ``X-Next-Cursor`` back as ``cursor``; a malformed cursor restarts.
+    """
+    from ting_ting.api.posts import _batch_post_responses
+    from ting_ting.models import Post
+
+    target = _find_by_username(db, username)
+    if (
+        social.is_blocked(db, me.id, target.id)
+        or (target.deactivated_at is not None and target.id != me.id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "not_found", "message": "User not found."},
+        )
+
+    if target.id == me.id:
+        allowed = {"ONLY_ME", "FRIENDS", "PUBLIC", "FOLLOWERS"}
+    else:
+        rel = social.relationship_state(db, me.id, target.id)
+        is_friend = rel == "friends"
+        is_follower = social.is_active_follower(db, me.id, target.id)
+        allowed = set()
+        if is_friend:
+            allowed |= {"FRIENDS", "PUBLIC"}
+        if is_follower:
+            allowed |= {"FOLLOWERS", "PUBLIC"}
+        if not target.is_private:
+            allowed |= {"PUBLIC"}
+
+    if not allowed:
+        return []
+
+    query = (
+        select(Post)
+        .where(Post.author_id == target.id, Post.audience.in_(allowed))
+        .order_by(Post.created_at.desc(), Post.id.desc())
+        .limit(limit + 1)
+    )
+    if cursor:
+        try:
+            created_at, row_id = decode_cursor(cursor)
+        except ValueError:
+            cursor = None
+        if cursor:
+            query = query.where(
+                or_(
+                    Post.created_at < created_at,
+                    and_(Post.created_at == created_at, Post.id < row_id),
+                )
+            )
+    rows = db.scalars(query).all()
+    db.commit()
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    if has_more:
+        response.headers[NEXT_CURSOR_HEADER] = encode_cursor(page[-1])
+    return _batch_post_responses(db, page, me.id)
