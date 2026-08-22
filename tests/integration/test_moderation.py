@@ -6,6 +6,8 @@ ban/unban enforcement (login 403, API 401, feed removal, discovery 404),
 and moderator content removal.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi import status
 
@@ -43,6 +45,14 @@ class _M:
         from ting_ting.models import User
         user = db_session.get(User, user_id)
         user.is_moderator = True
+        db_session.commit()
+        return user
+
+    @classmethod
+    def make_role(cls, db_session, user_id, role):
+        from ting_ting.models import User
+        user = db_session.get(User, user_id)
+        user.role = role
         db_session.commit()
         return user
 
@@ -216,6 +226,15 @@ class TestModeratorQueue:
         _M.login(client, "q_rpt")  # a normal user
         resp = client.get("/api/reports")
         assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.parametrize("role", ["moderator", "admin"])
+    def test_staff_roles_can_list_reports(self, client, db_session, role):
+        self._seed(client)
+        _M.make_role(db_session, _mod_id(client, "q_mod"), role)
+
+        resp = client.get("/api/reports")
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
 
     def test_list_reports_and_resolve(self, client, db_session):
         target, post, report_id = self._seed(client)
@@ -432,3 +451,110 @@ class TestBannedAuth:
         })
         assert resp.status_code == status.HTTP_403_FORBIDDEN
         assert resp.json()["error"]["code"] == "banned"
+
+
+class TestT028ModerationContract:
+    def test_warning_is_visible_to_target_and_in_staff_ledger(
+        self, client, db_session,
+    ):
+        mod = _M.register(client, "t28_warn_mod")
+        target = _M.register(client, "t28_warn_tgt")
+        _M.make_role(db_session, mod, "moderator")
+        _M.login(client, "t28_warn_mod")
+
+        issued = client.post(f"/api/mod/users/{target}/warnings", json={
+            "reason": "harassment", "note": "Stop targeting other users.",
+        })
+
+        assert issued.status_code == status.HTTP_201_CREATED, issued.text
+        assert issued.json()["user_id"] == target
+        _M.login(client, "t28_warn_tgt")
+        warnings = client.get("/api/account/warnings")
+        assert warnings.status_code == status.HTTP_200_OK, warnings.text
+        assert warnings.json()[0]["reason"] == "harassment"
+        assert "Stop targeting other users." in client.get("/web/account").text
+        exported = client.get("/api/account/export").json()
+        assert exported["moderation_warnings"][0]["reason"] == "harassment"
+
+        _M.login(client, "t28_warn_mod")
+        actions = client.get("/api/mod/actions")
+        assert actions.status_code == status.HTTP_200_OK, actions.text
+        assert any(a["action_type"] == "warning_issued" for a in actions.json())
+
+    def test_temporary_ban_returns_expiry_and_expired_ban_allows_login(
+        self, client, db_session,
+    ):
+        mod = _M.register(client, "t28_temp_mod")
+        target = _M.register(client, "t28_temp_tgt")
+        _M.make_role(db_session, mod, "moderator")
+        _M.login(client, "t28_temp_mod")
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        response = client.post("/api/social/bans", json={
+            "user_id": target,
+            "reason": "spam",
+            "expires_at": expires.isoformat(),
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.json()["reason"] == "spam"
+        assert response.json()["expires_at"] is not None
+
+        from ting_ting.models import User
+        row = db_session.get(User, target)
+        row.banned_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db_session.commit()
+        login = client.post("/api/auth/login", json={
+            "identifier": f"{_M.PREFIX}_t28_temp_tgt",
+            "password": "securepass1",
+        })
+        assert login.status_code == status.HTTP_200_OK, login.text
+
+    def test_moderator_cannot_ban_peer(self, client, db_session):
+        actor = _M.register(client, "t28_peer_actor")
+        peer = _M.register(client, "t28_peer_target")
+        _M.make_role(db_session, actor, "moderator")
+        _M.make_role(db_session, peer, "moderator")
+        _M.login(client, "t28_peer_actor")
+
+        response = client.post("/api/social/bans", json={
+            "user_id": peer, "reason": "other",
+        })
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
+
+    def test_admin_can_assign_moderator_role(self, client, db_session):
+        admin = _M.register(client, "t28_role_admin")
+        target = _M.register(client, "t28_role_target")
+        _M.make_role(db_session, admin, "admin")
+
+        _M.login(client, "t28_role_target")
+        denied = client.patch(f"/api/mod/users/{target}/role", json={
+            "role": "moderator", "reason": "self promotion",
+        })
+        assert denied.status_code == status.HTTP_403_FORBIDDEN
+
+        _M.login(client, "t28_role_admin")
+
+        response = client.patch(f"/api/mod/users/{target}/role", json={
+            "role": "moderator", "reason": "staffing",
+        })
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.json()["role"] == "moderator"
+
+    def test_whitespace_warning_and_role_reasons_are_validation_errors(
+        self, client, db_session,
+    ):
+        admin = _M.register(client, "t28_invalid_admin")
+        target = _M.register(client, "t28_invalid_target")
+        _M.make_role(db_session, admin, "admin")
+        _M.login(client, "t28_invalid_admin")
+
+        warning = client.post(f"/api/mod/users/{target}/warnings", json={"reason": "   "})
+        role = client.patch(f"/api/mod/users/{target}/role", json={
+            "role": "moderator", "reason": "   ",
+        })
+
+        assert warning.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert role.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY

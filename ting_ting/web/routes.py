@@ -5,6 +5,7 @@ Authentication is handled via the same HttpOnly cookie (``ting_ting_auth``).
 """
 
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlparse
 from uuid import uuid4
 
@@ -32,7 +33,7 @@ from ting_ting.config import Settings, get_settings
 from ting_ting.database import get_db
 from ting_ting.models import (
     Activity, Follow, FriendRequest, Mute, PostMedia, Repost,
-    SavedPost, User, UserProfile,
+    SavedPost, User, UserProfile, UserWarning,
 )
 from ting_ting import notifications
 from ting_ting import posts as posts_module
@@ -57,6 +58,7 @@ from ting_ting.interactions import (
     create_comment, list_comments, delete_comment, edit_comment,
     remove_like,
 )
+from ting_ting.user_state import is_actively_banned, is_staff, not_actively_banned_clause
 from ting_ting import social as social_logic
 from ting_ting.media import delete_stored_file
 from ting_ting.security import csrf_token_for, require_csrf
@@ -144,7 +146,7 @@ async def _store_post_media(upload, user_id: int) -> tuple[str, str] | None:
 
 def _people_context(db: Session, me: User) -> dict:
     users = db.execute(sa_select(User).where(
-        User.id != me.id, User.banned_at.is_(None),
+        User.id != me.id, not_actively_banned_clause(),
     ).order_by(User.username)).scalars().all()
     people = []
     for user in users:
@@ -403,7 +405,7 @@ async def login_submit(
                         active="login",
                         old={"identifier": identifier})
 
-    if user.banned_at is not None:
+    if is_actively_banned(user):
         return _render("login.html", request,
                         errors=["Your account has been temporarily locked by a moderator."],
                         active="login",
@@ -465,6 +467,11 @@ async def account_page(
         is_deactivated=me.deactivated_at is not None,
         notification_preferences=notifications.get_preferences(db, me.id),
         preferences_saved=request.query_params.get("preferences_saved") == "1",
+        warnings=list(db.scalars(
+            sa_select(UserWarning)
+            .where(UserWarning.user_id == me.id)
+            .order_by(UserWarning.created_at.desc(), UserWarning.id.desc())
+        ).all()),
     )
 
 
@@ -864,7 +871,7 @@ async def user_profile_page(
 ):
     target = db.execute(
         sa_select(User).where(
-            User.username == username, User.banned_at.is_(None),
+            User.username == username, not_actively_banned_clause(),
         )
     ).scalar_one_or_none()
     if not target:
@@ -1714,7 +1721,9 @@ async def report_post_submit(
         try:
             comment = db.get(Comment, int(raw_cid))
         except ValueError:
-            comment = None
+            return RedirectResponse(url="/web/feed", status_code=303)
+        if comment is None:
+            return RedirectResponse(url="/web/feed", status_code=303)
     if not post or not is_visible_to(post.author_id, me.id, post.audience, db):
         return RedirectResponse(url="/web/feed", status_code=303)
     if comment is not None and comment.post_id != post_id:
@@ -1727,7 +1736,7 @@ async def report_post_submit(
         mod.create_report(
             db,
             me,
-            post.author_id,
+            comment.author_id if comment else post.author_id,
             reason=reason,
             post_id=post_id,
             comment_id=comment.id if comment else None,
@@ -1739,7 +1748,7 @@ async def report_post_submit(
 
 
 def _require_moderator(me: User):
-    if not me.is_moderator:
+    if not is_staff(me):
         raise HTTPException(status_code=403, detail="Chức năng dành riêng cho điều phối viên.")
 
 
@@ -1791,11 +1800,11 @@ async def mod_report_resolve(
 
     _require_moderator(me)
     report = db.get(Report, report_id)
-    if report:
+    if report and not mod.report_expired(report):
         try:
             mod.resolve_report(
                 db, me, report,
-                note=(await request.form()).get("note", "").strip() or None,
+                note=(await request.form()).get("note", "").strip()[:500] or None,
             )
             db.commit()
         except ValueError:
@@ -1815,11 +1824,11 @@ async def mod_report_dismiss(
 
     _require_moderator(me)
     report = db.get(Report, report_id)
-    if report:
+    if report and not mod.report_expired(report):
         try:
             mod.resolve_report(
                 db, me, report, dismiss=True,
-                note=(await request.form()).get("note", "").strip() or None,
+                note=(await request.form()).get("note", "").strip()[:500] or None,
             )
             db.commit()
         except ValueError:
@@ -1841,7 +1850,46 @@ async def mod_ban_user(
     target = db.get(UserModel, user_id)
     if target:
         try:
-            mod.ban_user(db, me, target)
+            form = await request.form()
+            expires_at = None
+            raw_expiry = (form.get("expires_at") or "").strip()
+            if raw_expiry:
+                expires_at = datetime.fromisoformat(raw_expiry).replace(tzinfo=timezone.utc)
+            mod.ban_user(
+                db,
+                me,
+                target,
+                reason=(form.get("reason") or "policy_violation").strip(),
+                note=(form.get("note") or "").strip()[:500] or None,
+                expires_at=expires_at,
+            )
+            db.commit()
+        except (TypeError, ValueError):
+            db.rollback()
+    return RedirectResponse(url="/web/mod/reports", status_code=303)
+
+
+@router.post("/mod/users/{user_id}/warn")
+async def mod_warn_user(
+    user_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    from ting_ting import moderation as mod
+
+    _require_moderator(me)
+    target = db.get(User, user_id)
+    if target:
+        form = await request.form()
+        try:
+            mod.warn_user(
+                db,
+                me,
+                target,
+                reason=(form.get("reason") or "policy_violation").strip(),
+                note=(form.get("note") or "").strip()[:500] or None,
+            )
             db.commit()
         except ValueError:
             db.rollback()

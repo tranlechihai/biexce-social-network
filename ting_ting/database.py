@@ -209,6 +209,10 @@ _LEGACY_REQUIRED_CHECK_CONSTRAINTS = (
     "ck_mute_exactly_one_target",
     "ck_report_reason",
     "ck_report_status",
+    "ck_users_role",
+    "ck_warning_reason",
+    "ck_moderation_action_type",
+    "ck_moderation_action_resource_type",
 )
 _LEGACY_REQUIRED_FK_ACTIONS = (
     # (table, from_col, reftable, ondelete)
@@ -231,6 +235,12 @@ _LEGACY_REQUIRED_FK_ACTIONS = (
     ("reports", "reporter_id", "users", "SET NULL"),
     ("reports", "target_user_id", "users", "SET NULL"),
     ("reports", "resolved_by", "users", "SET NULL"),
+    ("users", "banned_by", "users", "SET NULL"),
+    ("user_warnings", "user_id", "users", "CASCADE"),
+    ("user_warnings", "issued_by", "users", "SET NULL"),
+    ("user_warnings", "report_id", "reports", "SET NULL"),
+    ("moderation_actions", "actor_id", "users", "SET NULL"),
+    ("moderation_actions", "target_user_id", "users", "SET NULL"),
 )
 
 
@@ -275,6 +285,7 @@ def _legacy_schema_matches_head(engine: Engine) -> bool:
             checks_ok
             and _search_artifacts_present(engine)
             and _notification_artifacts_present(engine)
+            and _moderation_artifacts_present(engine)
         )
     except Exception:
         # Introspection failure is drift from our point of view — fail closed.
@@ -368,6 +379,100 @@ def _require_notification_artifacts(engine: Engine) -> None:
         )
 
 
+def _moderation_artifacts_present(engine: Engine) -> bool:
+    try:
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        if not {"users", "user_warnings", "moderation_actions"} <= tables:
+            return False
+        user_columns = {c["name"] for c in insp.get_columns("users")}
+        required_user_columns = {
+            "role", "banned_at", "banned_until", "ban_reason", "banned_by",
+        }
+        if not required_user_columns <= user_columns or "is_moderator" in user_columns:
+            return False
+        warning_columns = {c["name"] for c in insp.get_columns("user_warnings")}
+        if not {
+            "id", "user_id", "issued_by", "report_id", "reason", "note", "created_at",
+        } <= warning_columns:
+            return False
+        action_columns = {c["name"] for c in insp.get_columns("moderation_actions")}
+        if not {
+            "id", "actor_id", "target_user_id", "action_type", "reason", "note",
+            "resource_type", "resource_id", "previous_state", "new_state", "created_at",
+        } <= action_columns:
+            return False
+        indexes = {i["name"] for i in insp.get_indexes("moderation_actions")}
+        if not {
+            "ix_moderation_actions_actor_id",
+            "ix_moderation_actions_target_user_id",
+            "ix_moderation_actions_created_id",
+        } <= indexes:
+            return False
+        checks = {
+            check.get("name")
+            for table in ("users", "user_warnings", "moderation_actions")
+            for check in insp.get_check_constraints(table)
+        }
+        if not {
+            "ck_users_role",
+            "ck_warning_reason",
+            "ck_moderation_action_type",
+            "ck_moderation_action_resource_type",
+        } <= checks:
+            return False
+        expected_fks = {
+            ("users", "banned_by", "users", "SET NULL"),
+            ("user_warnings", "user_id", "users", "CASCADE"),
+            ("user_warnings", "issued_by", "users", "SET NULL"),
+            ("user_warnings", "report_id", "reports", "SET NULL"),
+            ("moderation_actions", "actor_id", "users", "SET NULL"),
+            ("moderation_actions", "target_user_id", "users", "SET NULL"),
+        }
+        actual_fks = set()
+        for table in ("users", "user_warnings", "moderation_actions"):
+            for fk in insp.get_foreign_keys(table):
+                if len(fk["constrained_columns"]) == 1:
+                    action = (fk.get("options") or {}).get("ondelete", "NO ACTION")
+                    actual_fks.add((
+                        table,
+                        fk["constrained_columns"][0],
+                        fk["referred_table"],
+                        action.upper(),
+                    ))
+        if not expected_fks <= actual_fks:
+            return False
+        with engine.connect() as conn:
+            if engine.name == "sqlite":
+                triggers = {
+                    row[0] for row in conn.execute(text(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' "
+                        "AND tbl_name='moderation_actions'"
+                    ))
+                }
+                return {
+                    "trg_moderation_actions_no_update",
+                    "trg_moderation_actions_no_delete",
+                } <= triggers
+            triggers = {
+                row[0] for row in conn.execute(text(
+                    "SELECT tgname FROM pg_trigger "
+                    "WHERE tgrelid='moderation_actions'::regclass AND NOT tgisinternal"
+                ))
+            }
+            return "trg_moderation_actions_immutable" in triggers
+    except Exception:
+        return False
+
+
+def _require_moderation_artifacts(engine: Engine) -> None:
+    if not _moderation_artifacts_present(engine):
+        raise ValueError(
+            "Database is stamped at head but T-028 role/ban/ledger artifacts "
+            "are missing. Restore them before startup."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Schema initialization
 # ---------------------------------------------------------------------------
@@ -434,6 +539,7 @@ def validate_and_initialize_schema(
         _require_head(engine)
         _require_search_artifacts(engine)
         _require_notification_artifacts(engine)
+        _require_moderation_artifacts(engine)
         return engine
 
     # --- SQLite: Alembic is the schema authority ---
@@ -474,6 +580,7 @@ def validate_and_initialize_schema(
     _require_head(engine)
     _require_search_artifacts(engine)
     _require_notification_artifacts(engine)
+    _require_moderation_artifacts(engine)
     return engine
 
 

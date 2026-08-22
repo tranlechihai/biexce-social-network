@@ -25,6 +25,7 @@ from ting_ting.auth import (
 from ting_ting.config import Settings, get_settings
 from ting_ting.database import get_db
 from ting_ting.models import AuthSession, User
+from ting_ting.user_state import is_actively_banned
 from ting_ting.schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -129,7 +130,7 @@ async def login(
             },
         )
 
-    if user.banned_at is not None:
+    if is_actively_banned(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -214,7 +215,7 @@ async def refresh(
             ) from None
 
         user = db.get(User, session.user_id)
-        if user is None or user.banned_at is not None:
+        if user is None or is_actively_banned(user):
             if user is not None:
                 session_service.revoke_session(db, session.id)
             db.commit()

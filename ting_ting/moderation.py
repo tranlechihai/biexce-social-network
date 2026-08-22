@@ -16,13 +16,15 @@ Rules:
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ting_ting.models import (
-    Comment, Follow, FriendRequest, Post, Report, User,
+    Comment, Follow, FriendRequest, ModerationAction, Post, Report, User,
+    UserWarning,
 )
+from ting_ting.user_state import ROLE_RANK, is_actively_banned, is_staff
 
 REPORT_REASONS = ("spam", "harassment", "hate_speech", "false_info", "other")
 PENDING = "pending"
@@ -34,6 +36,59 @@ DISMISSED = "dismissed"
 #: at the read boundaries (``list_reports`` / resolve guards) — the retention
 #: decision of 2026-08-21.
 EVIDENCE_RETENTION_DAYS = 30
+ROLES = ("user", "moderator", "admin")
+
+
+def _clean_reason(reason: str) -> str:
+    value = reason.strip()
+    if not value or len(value) > 120:
+        raise ValueError("invalid_reason")
+    return value
+
+
+def _require_staff(actor: User) -> None:
+    if not is_staff(actor):
+        raise ValueError("staff_required")
+
+
+def _require_can_enforce(actor: User, target: User) -> None:
+    _require_staff(actor)
+    if actor.id == target.id:
+        raise ValueError("self_action")
+    if ROLE_RANK[actor.role] <= ROLE_RANK[target.role]:
+        raise ValueError("insufficient_role")
+
+
+def _record_action(
+    db: Session,
+    actor: User,
+    action_type: str,
+    *,
+    target: User | None = None,
+    reason: str | None = None,
+    note: str | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    previous_state: str | None = None,
+    new_state: str | None = None,
+) -> ModerationAction:
+    action = ModerationAction(
+        actor_id=actor.id,
+        target_user_id=target.id if target else None,
+        action_type=action_type,
+        reason=reason,
+        note=note,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        previous_state=previous_state,
+        new_state=new_state,
+    )
+    db.add(action)
+    return action
+
+
+def is_user_banned(user: User, now: datetime | None = None) -> bool:
+    return is_actively_banned(user, now)
 
 
 def retention_cutoff(now: datetime | None = None) -> datetime:
@@ -158,12 +213,28 @@ def resolve_report(
 
     Raises ``ValueError``: ``not_pending``.
     """
+    _require_staff(moderator)
+    target = db.get(User, report.target_user_id) if report.target_user_id else None
+    if target is not None:
+        _require_can_enforce(moderator, target)
     if report.status != PENDING:
         raise ValueError("not_pending")
     report.status = DISMISSED if dismiss else RESOLVED
     report.resolved_by = moderator.id
     report.resolved_at = datetime.now(timezone.utc)
     report.resolution_note = note
+    _record_action(
+        db,
+        moderator,
+        "report_dismissed" if dismiss else "report_resolved",
+        target=target,
+        reason=report.reason,
+        note=note,
+        resource_type="report",
+        resource_id=report.id,
+        previous_state=PENDING,
+        new_state=report.status,
+    )
     db.flush()
     return report
 
@@ -195,23 +266,57 @@ def _sever_relationships(db: Session, user_id: int) -> None:
         db.delete(req)
 
 
-def ban_user(db: Session, moderator: User, target: User) -> User:
+def ban_user(
+    db: Session,
+    moderator: User,
+    target: User,
+    *,
+    reason: str = "policy_violation",
+    expires_at: datetime | None = None,
+    note: str | None = None,
+) -> User:
     """Ban ``target`` (moderators only) — idempotent.
 
     Effects: ``banned_at`` set; follows + friend requests severed; every
     pending report against the target resolved with the acting moderator.
     Raises ``ValueError``: ``self_ban``.
     """
-    if moderator.id == target.id:
-        raise ValueError("self_ban")
+    try:
+        _require_can_enforce(moderator, target)
+    except ValueError as exc:
+        if exc.args[0] == "self_action":
+            raise ValueError("self_ban") from None
+        raise
+
+    reason = _clean_reason(reason)
+    if expires_at is not None:
+        comparable = expires_at
+        if comparable.tzinfo is not None:
+            comparable = comparable.astimezone(timezone.utc).replace(tzinfo=None)
+        if comparable <= datetime.now(timezone.utc).replace(tzinfo=None):
+            raise ValueError("invalid_expiry")
 
     now = datetime.now(timezone.utc)
-    if target.banned_at is None:
+    if not is_actively_banned(target, now):
         target.banned_at = now
+        target.banned_until = expires_at
+        target.ban_reason = reason
+        target.banned_by = moderator.id
         _sever_relationships(db, target.id)
+        _record_action(
+            db,
+            moderator,
+            "user_banned",
+            target=target,
+            reason=reason,
+            note=note,
+            resource_type="user",
+            previous_state="active",
+            new_state="banned",
+        )
 
-    db.execute(
-        Report.__table__.update()
+    updated_report_ids = list(db.scalars(
+        update(Report)
         .where(
             Report.target_user_id == target.id,
             Report.status == PENDING,
@@ -222,7 +327,24 @@ def ban_user(db: Session, moderator: User, target: User) -> User:
             resolved_at=now,
             resolution_note="User banned.",
         )
-    )
+        .returning(Report.id)
+    ).all())
+    if updated_report_ids:
+        db.execute(insert(ModerationAction), [
+            {
+                "actor_id": moderator.id,
+                "target_user_id": target.id,
+                "action_type": "report_resolved",
+                "reason": "ban_enforcement",
+                "note": "Resolved by user ban.",
+                "resource_type": "report",
+                "resource_id": report_id,
+                "previous_state": PENDING,
+                "new_state": RESOLVED,
+                "created_at": now,
+            }
+            for report_id in updated_report_ids
+        ])
     db.flush()
     return target
 
@@ -230,11 +352,107 @@ def ban_user(db: Session, moderator: User, target: User) -> User:
 def unban_user(db: Session, moderator: User, target: User) -> User:
     """Lift a ban (moderators only) — idempotent. Does not restore severed
     follows or friend requests."""
-    if moderator.id == target.id:
-        raise ValueError("self_unban")
+    try:
+        _require_can_enforce(moderator, target)
+    except ValueError as exc:
+        if exc.args[0] == "self_action":
+            raise ValueError("self_unban") from None
+        raise
     if target.banned_at is not None:
         target.banned_at = None
+        target.banned_until = None
+        target.ban_reason = None
+        target.banned_by = None
+        _record_action(
+            db,
+            moderator,
+            "user_unbanned",
+            target=target,
+            resource_type="user",
+            previous_state="banned",
+            new_state="active",
+        )
         db.flush()
+    return target
+
+
+def warn_user(
+    db: Session,
+    moderator: User,
+    target: User,
+    *,
+    reason: str,
+    note: str | None = None,
+    report_id: int | None = None,
+) -> UserWarning:
+    """Issue a user-visible warning and append its immutable audit action."""
+    _require_can_enforce(moderator, target)
+    reason = _clean_reason(reason)
+    if report_id is not None:
+        report = db.get(Report, report_id)
+        if (
+            report is None
+            or report.target_user_id != target.id
+            or report_expired(report)
+        ):
+            raise ValueError("invalid_report")
+    warning = UserWarning(
+        user_id=target.id,
+        issued_by=moderator.id,
+        report_id=report_id,
+        reason=reason,
+        note=note,
+    )
+    db.add(warning)
+    db.flush()
+    _record_action(
+        db,
+        moderator,
+        "warning_issued",
+        target=target,
+        reason=reason,
+        note=note,
+        resource_type="user",
+    )
+    db.flush()
+    return warning
+
+
+def change_role(
+    db: Session,
+    admin: User,
+    target: User,
+    *,
+    new_role: str,
+    reason: str,
+) -> User:
+    """Admin-only role assignment; admins cannot mutate self or peer admins."""
+    if admin.role != "admin":
+        raise ValueError("admin_required")
+    if admin.id == target.id:
+        raise ValueError("self_role_change")
+    if target.role == "admin":
+        raise ValueError("insufficient_role")
+    if is_actively_banned(target):
+        raise ValueError("banned_target")
+    if new_role not in ROLES:
+        raise ValueError("invalid_role")
+    reason = _clean_reason(reason)
+    if target.role == new_role:
+        return target
+    previous = target.role
+    target.role = new_role
+    _record_action(
+        db,
+        admin,
+        "role_changed",
+        target=target,
+        reason=reason,
+        resource_type="user",
+        previous_state=previous,
+        new_state=new_role,
+    )
+    db.flush()
     return target
 
 
@@ -242,16 +460,42 @@ def unban_user(db: Session, moderator: User, target: User) -> User:
 # Moderator content removal
 # ---------------------------------------------------------------------------
 
-def delete_post_moderation(db: Session, post: Post) -> Post:
+def delete_post_moderation(
+    db: Session, moderator: User, post: Post, *, reason: str = "policy_violation",
+) -> Post:
     """Delete a post as a moderation action — no author check (the caller
     enforces moderator authorization)."""
+    target = db.get(User, post.author_id)
+    if target is None:
+        raise ValueError("target_missing")
+    _require_can_enforce(moderator, target)
+    reason = _clean_reason(reason)
+    _record_action(
+        db, moderator, "post_removed", target=target, reason=reason,
+        resource_type="post", resource_id=post.id,
+    )
     db.delete(post)
     db.flush()
     return post
 
 
-def delete_comment_moderation(db: Session, comment: Comment) -> Comment:
+def delete_comment_moderation(
+    db: Session,
+    moderator: User,
+    comment: Comment,
+    *,
+    reason: str = "policy_violation",
+) -> Comment:
     """Delete a comment as a moderation action — replies cascade (DB)."""
+    target = db.get(User, comment.author_id)
+    if target is None:
+        raise ValueError("target_missing")
+    _require_can_enforce(moderator, target)
+    reason = _clean_reason(reason)
+    _record_action(
+        db, moderator, "comment_removed", target=target, reason=reason,
+        resource_type="comment", resource_id=comment.id,
+    )
     db.delete(comment)
     db.flush()
     return comment

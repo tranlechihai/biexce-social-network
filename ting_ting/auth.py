@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ting_ting.config import Settings, get_settings
 from ting_ting.database import get_db
 from ting_ting.models import User
+from ting_ting.user_state import is_actively_banned
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ async def get_current_user(
     # Expose to later handlers on the same request (logout, refresh, ...).
     request.state.sid = session_id
 
-    if user.banned_at is not None:
+    if is_actively_banned(user):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=_error_detail(
@@ -207,7 +208,7 @@ def get_current_user_web(
     if session_service.get_active_session(db, session_id) is None:
         raise WebAuthRedirect()
     request.state.sid = session_id
-    if user.banned_at is not None:
+    if is_actively_banned(user):
         raise WebBanned()
     return user
 

@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from ting_ting.models import (
     Activity, Block, Comment, DeletedAccount, Follow, FriendRequest,
     Like, Mute, Post, PostMedia,
-    Repost, Report, SavedPost, User, UserProfile,
+    Repost, Report, SavedPost, User, UserProfile, UserWarning,
 )
 from ting_ting import sessions as session_service
 from ting_ting.auth import verify_password
@@ -117,6 +117,20 @@ def export_account(db: Session, user: User) -> dict:
 
     from ting_ting import notifications as notification_service
 
+    warnings = [
+        {
+            "id": warning.id,
+            "report_id": warning.report_id,
+            "reason": warning.reason,
+            "note": warning.note,
+            "created_at": _dt(warning.created_at),
+        }
+        for warning in db.scalars(
+            select(UserWarning).where(UserWarning.user_id == user.id)
+            .order_by(UserWarning.created_at.asc(), UserWarning.id.asc())
+        ).all()
+    ]
+
     return {
         "user": {
             "id": user.id,
@@ -125,6 +139,9 @@ def export_account(db: Session, user: User) -> dict:
             "display_name": user.display_name,
             "bio": user.bio,
             "banned_at": _dt(user.banned_at),
+            "banned_until": _dt(user.banned_until),
+            "ban_reason": user.ban_reason,
+            "role": user.role,
             "deactivated_at": _dt(user.deactivated_at),
         },
         "profile": {
@@ -144,6 +161,7 @@ def export_account(db: Session, user: User) -> dict:
         "follower_user_ids": followers,
         "notifications": activities,
         "notification_preferences": notification_service.get_preferences(db, user.id),
+        "moderation_warnings": warnings,
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }
 

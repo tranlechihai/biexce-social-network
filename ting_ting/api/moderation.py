@@ -21,9 +21,22 @@ from ting_ting import moderation
 from ting_ting.auth import get_current_user
 from ting_ting.database import get_db
 from ting_ting.media import delete_stored_file
-from ting_ting.models import Comment, Post, PostMedia, Report, User
+from ting_ting.models import (
+    Comment, ModerationAction, Post, PostMedia, Report, User, UserWarning,
+)
 from ting_ting.posts import is_visible_to
-from ting_ting.schemas import ReportCreateRequest, ReportResponse
+from ting_ting.schemas import (
+    BanCreateRequest,
+    BanResponse,
+    ModerationActionResponse,
+    ReportCreateRequest,
+    ReportResponse,
+    RoleUpdateRequest,
+    RoleUpdateResponse,
+    WarningCreateRequest,
+    WarningResponse,
+)
+from ting_ting.user_state import is_staff
 
 router = APIRouter(tags=["moderation"])
 
@@ -32,13 +45,22 @@ def get_moderator_role(
     me: User = Depends(get_current_user),
 ) -> User:
     """Dependency: require the authenticated user to be a moderator."""
-    if not me.is_moderator:
+    if not is_staff(me):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "forbidden",
                 "message": "Moderator privileges are required.",
             },
+        )
+    return me
+
+
+def get_admin_role(me: User = Depends(get_current_user)) -> User:
+    if me.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "forbidden", "message": "Admin privileges are required."},
         )
     return me
 
@@ -212,7 +234,12 @@ def _mod_resolve(db: Session, me: User, report_id: int, dismiss: bool,
         )
     try:
         moderation.resolve_report(db, me, report, dismiss=dismiss, note=note)
-    except ValueError:
+    except ValueError as exc:
+        if exc.args[0] == "insufficient_role":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot process this report."},
+            ) from None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -253,33 +280,34 @@ def dismiss_report(
 
 @router.post(
     "/social/bans",
+    response_model=BanResponse,
     status_code=status.HTTP_200_OK,
 )
 def ban_user_endpoint(
-    body: dict,
+    body: BanCreateRequest,
     db: Session = Depends(get_db),
     me: User = Depends(get_moderator_role),
 ):
     """Ban a user — freezes the account, severs relationships, resolves
     their pending reports. Idempotent."""
-    raw_id = body.get("user_id") if isinstance(body, dict) else None
-    if not raw_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "validation", "message": "user_id is required."},
-        )
-    try:
-        target_id = int(raw_id)
-    except (TypeError, ValueError):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "validation", "message": "user_id must be an integer."},
-        ) from None
-    target = _find_user(db, target_id)
+    target = _find_user(db, body.user_id)
 
     try:
-        moderation.ban_user(db, me, target)
-    except ValueError:
+        moderation.ban_user(
+            db, me, target, reason=body.reason, note=body.note,
+            expires_at=body.expires_at,
+        )
+    except ValueError as exc:
+        if exc.args[0] in {"staff_required", "insufficient_role"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot ban this user."},
+            ) from None
+        if exc.args[0] in {"invalid_reason", "invalid_expiry"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "validation", "message": "Invalid ban details."},
+            ) from None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -289,7 +317,14 @@ def ban_user_endpoint(
         ) from None
 
     db.commit()
-    return {"message": "User banned.", "user_id": target.id}
+    db.refresh(target)
+    return BanResponse(
+        message="User banned.",
+        user_id=target.id,
+        reason=target.ban_reason or body.reason,
+        banned_at=target.banned_at,
+        expires_at=target.banned_until,
+    )
 
 
 @router.delete("/social/bans/{user_id}")
@@ -303,7 +338,12 @@ def unban_user_endpoint(
 
     try:
         moderation.unban_user(db, me, target)
-    except ValueError:
+    except ValueError as exc:
+        if exc.args[0] in {"staff_required", "insufficient_role"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot unban this user."},
+            ) from None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -314,6 +354,97 @@ def unban_user_endpoint(
 
     db.commit()
     return {"message": "User unbanned."}
+
+
+@router.post(
+    "/mod/users/{user_id}/warnings",
+    response_model=WarningResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def warn_user_endpoint(
+    user_id: int,
+    body: WarningCreateRequest,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_moderator_role),
+):
+    target = _find_user(db, user_id)
+    try:
+        warning = moderation.warn_user(
+            db, me, target, reason=body.reason, note=body.note,
+            report_id=body.report_id,
+        )
+    except ValueError as exc:
+        code = exc.args[0]
+        if code in {"staff_required", "self_action", "insufficient_role"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot warn this user."},
+            ) from None
+        if code in {"invalid_report", "invalid_reason"}:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "validation", "message": "Invalid warning details."},
+            ) from None
+        raise
+    db.commit()
+    db.refresh(warning)
+    return warning
+
+
+@router.get("/account/warnings", response_model=list[WarningResponse])
+def list_own_warnings(
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    return list(db.scalars(
+        select(UserWarning)
+        .where(UserWarning.user_id == me.id)
+        .order_by(UserWarning.created_at.desc(), UserWarning.id.desc())
+    ).all())
+
+
+@router.get("/mod/actions", response_model=list[ModerationActionResponse])
+def list_moderation_actions(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    me: User = Depends(get_moderator_role),
+):
+    return list(db.scalars(
+        select(ModerationAction)
+        .order_by(ModerationAction.created_at.desc(), ModerationAction.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all())
+
+
+@router.patch("/mod/users/{user_id}/role", response_model=RoleUpdateResponse)
+def update_user_role(
+    user_id: int,
+    body: RoleUpdateRequest,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_admin_role),
+):
+    target = _find_user(db, user_id)
+    try:
+        moderation.change_role(
+            db, me, target, new_role=body.role, reason=body.reason,
+        )
+    except ValueError as exc:
+        if exc.args[0] in {"self_role_change", "insufficient_role", "banned_target"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "conflict", "message": "This role cannot be changed."},
+            ) from None
+        if exc.args[0] == "invalid_reason":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "validation", "message": "Invalid role-change reason."},
+            ) from None
+        raise
+    db.commit()
+    db.refresh(target)
+    return RoleUpdateResponse(user_id=target.id, role=target.role)
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +467,15 @@ def mod_delete_post(
     media_paths = list(
         db.scalars(select(PostMedia.path).where(PostMedia.post_id == post.id)).all()
     )
-    moderation.delete_post_moderation(db, post)
+    try:
+        moderation.delete_post_moderation(db, me, post)
+    except ValueError as exc:
+        if exc.args[0] in {"self_action", "insufficient_role"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot remove this post."},
+            ) from None
+        raise
     db.commit()
     for path in media_paths:
         delete_stored_file(path)
@@ -356,6 +495,14 @@ def mod_delete_comment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_found", "message": "Comment not found."},
         )
-    moderation.delete_comment_moderation(db, comment)
+    try:
+        moderation.delete_comment_moderation(db, me, comment)
+    except ValueError as exc:
+        if exc.args[0] in {"self_action", "insufficient_role"}:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "You cannot remove this comment."},
+            ) from None
+        raise
     db.commit()
     return {"message": "Comment removed."}

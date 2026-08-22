@@ -30,6 +30,7 @@ from ting_ting.schemas import (
     FEED_LIMIT_MAX,
     FEED_LIMIT_DEFAULT,
 )
+from ting_ting.user_state import is_actively_banned, not_actively_banned_clause
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -50,7 +51,7 @@ def _find_by_username(db: Session, username: str) -> User:
     user = db.scalar(
         select(User)
         .where(User.username == username)
-        .where(User.banned_at.is_(None))
+        .where(not_actively_banned_clause())
     )
     if user is None:
         raise HTTPException(
@@ -204,7 +205,7 @@ def _followers_or_404(
         user = db.get(User, getattr(row, other_column))
         if (
             user is not None
-            and user.banned_at is None
+            and not is_actively_banned(user)
             and user.deactivated_at is None  # T-023: hide self-deactivated
             and not social.is_blocked(db, me.id, user.id)
         ):

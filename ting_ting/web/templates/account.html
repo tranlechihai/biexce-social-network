@@ -32,6 +32,15 @@
 
 <div class="settings-divider"></div>
 
+<section class="form" aria-labelledby="warnings-heading">
+    <h2 id="warnings-heading">Cảnh báo kiểm duyệt</h2>
+    {% for warning in warnings or [] %}
+    <article class="person-list-row"><div><strong>{{ warning.reason }}</strong>{% if warning.note %}<p>{{ warning.note }}</p>{% endif %}<small>{{ warning.created_at.strftime('%Y-%m-%d %H:%M') }}</small></div></article>
+    {% else %}<p class="session-hint">Tài khoản chưa có cảnh báo.</p>{% endfor %}
+</section>
+
+<div class="settings-divider"></div>
+
 {% if is_deactivated %}
 <form class="form" action="/web/account/reactivate" method="post">
     <h2>Tài khoản đang bị vô hiệu hóa</h2>

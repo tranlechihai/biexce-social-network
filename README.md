@@ -195,6 +195,15 @@ and refuses a non-empty target.
   /api/v1/notifications/aggregates/{aggregation_key}/read`; the key carries a
   cutoff, so events arriving afterward remain unread. Account settings expose
   the same preferences on the web.
+- Moderation controls (T-028): users carry a live `user` / `moderator` /
+  `admin` role (the JWT does not cache privilege). Moderator and admin accounts
+  can issue user-visible warnings (`POST /api/v1/mod/users/{id}/warnings`),
+  create permanent or expiring bans (`POST /api/v1/social/bans`), resolve
+  reports, and remove content, subject to the role hierarchy. Users read their
+  own warnings at `GET /api/v1/account/warnings`. Every enforcement mutation
+  appends to the staff ledger at `GET /api/v1/mod/actions`; only admins can
+  change another non-admin account's role with `PATCH
+  /api/v1/mod/users/{id}/role`. No account is promoted to admin automatically.
 - Observability: `GET /health` (liveness), `GET /ready` (DB check, 503 when
   down), `GET /metrics` (Prometheus text). Every response carries
   `X-Request-ID`, matching the one-line access log (`rid=... path -> status`).
@@ -219,7 +228,8 @@ and refuses a non-empty target.
 - `ting_ting/api/extensions.py` — Extended profile, follow/activity, saved/repost, and media REST APIs
 - `ting_ting/media.py` — Authorized local media storage and delivery
 - `ting_ting/uploads.py` — Upload validation (magic bytes, blocked-content scan) + quota
-- `ting_ting/moderation.py` — Reports, resolve/dismiss audit, ban/unban, mod content removal
+- `ting_ting/moderation.py` — Role hierarchy, reports, warnings, expiring bans,
+  append-only action ledger, and moderator content removal
 - `ting_ting/sessions.py` — Server-side session registry (revoke/logout-all)
 - `ting_ting/notifications.py` — Notification service shared by web and API
 - `ting_ting/keyset.py` — Keyset pagination cursors

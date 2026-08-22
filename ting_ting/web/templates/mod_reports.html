@@ -22,7 +22,8 @@
     <div class="button-row">
       <form action="/web/mod/reports/{{ r.id }}/resolve" method="post"><label class="field-note" for="note-{{ r.id }}-resolve">Ghi chú</label><input type="text" id="note-{{ r.id }}-resolve" name="note" class="input-note" maxlength="500" placeholder="đã xóa/chặn…"><button class="btn btn-primary">Xử lý</button></form>
       <form action="/web/mod/reports/{{ r.id }}/dismiss" method="post"><label class="field-note" for="note-{{ r.id }}-dismiss">Ghi chú</label><input type="text" id="note-{{ r.id }}-dismiss" name="note" class="input-note" maxlength="500" placeholder="không vi phạm…"><button class="btn btn-secondary">Bỏ qua</button></form>
-      <form action="/web/mod/users/{{ r.target_id }}/ban" method="post" data-confirm class="ban-form"><button class="btn btn-danger">Khóa tài khoản</button></form>
+      <form action="/web/mod/users/{{ r.target_id }}/warn" method="post"><label class="field-note" for="warn-reason-{{ r.id }}">Lý do cảnh báo</label><input type="text" id="warn-reason-{{ r.id }}" name="reason" class="input-note" maxlength="120" required value="{{ r.reason_label }}"><label class="field-note" for="warn-note-{{ r.id }}">Nội dung</label><input type="text" id="warn-note-{{ r.id }}" name="note" class="input-note" maxlength="500"><button class="btn btn-secondary">Cảnh báo</button></form>
+      <form action="/web/mod/users/{{ r.target_id }}/ban" method="post" data-confirm class="ban-form"><label class="field-note" for="ban-reason-{{ r.id }}">Lý do khóa</label><input type="text" id="ban-reason-{{ r.id }}" name="reason" class="input-note" maxlength="120" required value="{{ r.reason_label }}"><label class="field-note" for="ban-expiry-{{ r.id }}">Hết hạn theo UTC (để trống = vĩnh viễn)</label><input type="datetime-local" id="ban-expiry-{{ r.id }}" name="expires_at" class="input-note"><button class="btn btn-danger">Khóa tài khoản</button></form>
     </div>
     {% endif %}
   </article>{% else %}

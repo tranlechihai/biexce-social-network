@@ -24,6 +24,7 @@ import os
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import sessionmaker
 
 pytestmark = pytest.mark.skipif(
@@ -144,6 +145,29 @@ def test_p015_notification_preferences_and_dedup_indexes(pg_engine):
         assert "source_key IS NOT NULL" in indexes["ux_activities_unread_dedup"]
 
 
+def test_p016_moderator_roles_and_ledger_present(pg_engine):
+    with pg_engine.connect() as conn:
+        assert {"user_warnings", "moderation_actions"} <= _public_tables(pg_engine)
+        columns = {
+            row[0]: row[1]
+            for row in conn.execute(text(
+                "SELECT column_name,column_default FROM information_schema.columns "
+                "WHERE table_name='users' AND column_name IN ('role','is_moderator')"
+            ))
+        }
+        assert "role" in columns and "'user'" in (columns["role"] or "")
+        assert "is_moderator" not in columns
+        constraints = {
+            row[0] for row in conn.execute(text(
+                "SELECT conname FROM pg_constraint WHERE conname IN "
+                "('ck_users_role','ck_warning_reason','ck_moderation_action_type')"
+            ))
+        }
+        assert constraints == {
+            "ck_users_role", "ck_warning_reason", "ck_moderation_action_type",
+        }
+
+
 def test_startup_refuses_unmanaged_database(pg_engine):
     """Tables without an alembic_version stamp -> fail closed (no mutation)."""
     from ting_ting.database import _alembic_head_revision, validate_and_initialize_schema
@@ -218,12 +242,11 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
         s.flush()
         s.add(UserProfile(user_id=alice.id, location="Hanoi"))
         # Explicit large id: proves sequence re-anchoring past copied IDs.
-        # is_moderator is NOT NULL without a DB default (Python-side default only),
-# so the raw SQL must provide it.
+        # Explicit role proves the T-028 scalar role survives the data copy.
         s.execute(
             text(
-                "INSERT INTO users (id, username, email, password_hash, is_moderator) "
-                "VALUES (9001, 'gap', 'gap@example.com', :ph, 0)"
+                "INSERT INTO users (id, username, email, password_hash, role) "
+                "VALUES (9001, 'gap', 'gap@example.com', :ph, 'moderator')"
             ),
             {"ph": hash_password("whatever1")},
         )
@@ -439,6 +462,60 @@ def test_api_smoke_on_postgres(pg_engine):
             f"/api/v1/notifications/aggregates/{comment_group['aggregation_key']}/read"
         )
         assert marked.status_code == 200 and marked.json()["updated"] == 2
+
+        # T-028 role authorization, warning persistence, and ledger on PG.
+        with pg_engine.begin() as conn:
+            conn.execute(text("UPDATE users SET role='moderator' WHERE username='pguser'"))
+        warning = client.post(
+            f"/api/v1/mod/users/{stranger_id}/warnings",
+            json={"reason": "spam", "note": "PG moderation warning"},
+        )
+        assert warning.status_code == 201, warning.text
+        actions = client.get("/api/v1/mod/actions")
+        assert actions.status_code == 200, actions.text
+        assert any(a["action_type"] == "warning_issued" for a in actions.json())
+        with pytest.raises(DatabaseError, match="moderation_action_immutable"):
+            with pg_engine.begin() as conn:
+                conn.execute(text(
+                    "UPDATE moderation_actions SET reason='rewritten' "
+                    "WHERE action_type='warning_issued'"
+                ))
+        with pytest.raises(DatabaseError, match="moderation_action_immutable"):
+            with pg_engine.begin() as conn:
+                conn.execute(text(
+                    "UPDATE moderation_actions SET target_user_id=NULL "
+                    "WHERE action_type='warning_issued'"
+                ))
+
+        delete_target = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "pgdelete",
+                "email": "pgdelete@example.com",
+                "password": "password123",
+            },
+        )
+        assert delete_target.status_code == 201, delete_target.text
+        delete_target_id = delete_target.json()["id"]
+        assert client.post(
+            f"/api/v1/mod/users/{delete_target_id}/warnings",
+            json={"reason": "other"},
+        ).status_code == 201
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM users WHERE id=:id"), {"id": delete_target_id},
+            )
+            assert conn.execute(text(
+                "SELECT target_user_id FROM moderation_actions "
+                "WHERE action_type='warning_issued' ORDER BY id DESC LIMIT 1"
+            )).scalar_one() is None
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"identifier": "pgstranger", "password": "password123"},
+        ).status_code == 200
+        own_warnings = client.get("/api/v1/account/warnings")
+        assert own_warnings.status_code == 200, own_warnings.text
+        assert own_warnings.json()[0]["note"] == "PG moderation warning"
 
         ready = client.get("/ready")
         assert ready.status_code == 200 and ready.json()["database"] == "ok"

@@ -83,7 +83,7 @@ mạnh (đang bị brute-force — rate limit login là 20/phút/IP, xem xét gi
 | Service dead | `systemctl --user status biexce-social-user.service` + `journalctl --user -u biexce-social-user.service -n 100` | Sửa lỗi, restart. Nếu crash do DB: xem `/ready`, restore backup nếu corrupt |
 | DB corrupt / file mất | `PRAGMA integrity_check` trên file | Restore từ `backups/` mới nhất bằng `scripts/restore_sqlite.sh` |
 | Đột ngột 500 sau deploy | `journalctl` + `X-Request-ID` | `alembic current` đối chiếu revision; rollback code hoặc migration (mục 2) |
-| User báo bị khóa oan | `SELECT id,username,banned_at FROM users WHERE banned_at IS NOT NULL` | Unban từ trang mod (`/web/mod/reports`) khi xác nhận nhầm lẫn |
+| User báo bị khóa oan | `SELECT id,username,banned_at,banned_until,ban_reason FROM users WHERE banned_at IS NOT NULL AND (banned_until IS NULL OR banned_until > CURRENT_TIMESTAMP)` | Đối chiếu `moderation_actions`, rồi unban từ trang mod (`/web/mod/reports`) khi xác nhận nhầm lẫn |
 | Disk đầy | `du -sh . uploads/ backups/ logs*` | Xóa backup cũ (tự giữ 10), dọn uploads orphan |
 | Bị brute-force login | `/metrics` → `auth_login_failures_total` | Rate limit đang chặn 20 req/phút/IP; ghi nhận IP, cân nhắc ban via mod tools |
 
@@ -123,10 +123,13 @@ Playbook đầy đủ (trách nhiệm ai làm gì, lệnh từng bước, eviden
 5. Smoke + `pg_dump` ngay sau đó (mục 3); giữ file SQLite cũ làm rollback
    target cho tới 7 ngày ổn định (rollback: mục 6 của handoff doc).
 
-## 8. Mở khóa moderator (dev)
+## 8. Cấp role kiểm duyệt (dev/operator)
 
 ```sql
-UPDATE users SET is_moderator = 1 WHERE username = '<user>';
+UPDATE users SET role = 'moderator' WHERE username = '<user>';
+-- Chỉ bootstrap admin qua operator access đã kiểm soát; ứng dụng không tự tạo admin.
+UPDATE users SET role = 'admin' WHERE username = '<bootstrap-admin>';
 ```
 
-(Nhớ xóa/đăng ký lại hoặc restart session nếu đang test: flag đọc mỗi request web.)
+Role được đọc trực tiếp từ DB mỗi request, không nằm trong JWT; session hiện tại
+nhận quyền mới ngay. Ghi nhận bootstrap admin trong change ticket/operator audit.

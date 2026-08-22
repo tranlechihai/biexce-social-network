@@ -1,12 +1,15 @@
-"""Unit tests for Increment 5 — moderation service (reports + bans)."""
+"""Unit tests for moderation reports, roles, warnings, bans, and ledger."""
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DatabaseError
 
 from ting_ting import interactions, moderation, posts as posts_service
 from ting_ting.auth import hash_password
 from ting_ting.models import (
-    Follow, FriendRequest, Post, User,
+    Follow, FriendRequest, ModerationAction, Post, User, UserWarning,
 )
 
 
@@ -273,6 +276,11 @@ class TestBan:
         assert row.resolved_by == mod.id
         tmp_session.refresh(other_row)
         assert other_row.status == moderation.RESOLVED
+        action_types = list(tmp_session.scalars(
+            select(ModerationAction.action_type).order_by(ModerationAction.id)
+        ))
+        assert "user_banned" in action_types
+        assert "report_resolved" in action_types
 
     def test_ban_idempotent(self, tmp_session, four_users):
         target, mod = four_users[1], four_users[3]
@@ -328,3 +336,134 @@ class TestBan:
         a, target = four_users[0], four_users[1]
         social_logic.mute_post(tmp_session, a, public_post.id)
         assert social_logic.is_muted_by(tmp_session, a.id, target.id) is False
+
+
+class TestRolesWarningsAndLedger:
+    def test_warning_is_user_visible_and_writes_ledger(
+        self, tmp_session, four_users,
+    ):
+        target, mod = four_users[1], four_users[3]
+
+        warning = moderation.warn_user(
+            tmp_session, mod, target, reason="harassment", note="Stop targeting users.",
+        )
+        tmp_session.commit()
+
+        assert warning.user_id == target.id
+        assert tmp_session.scalar(select(UserWarning).where(
+            UserWarning.user_id == target.id,
+        )) is not None
+        action = tmp_session.scalar(select(ModerationAction).where(
+            ModerationAction.action_type == "warning_issued",
+        ))
+        assert action is not None
+        assert action.actor_id == mod.id
+        assert action.target_user_id == target.id
+
+    def test_temporary_ban_expires_and_keeps_history(
+        self, tmp_session, four_users,
+    ):
+        target, mod = four_users[1], four_users[3]
+        expires = datetime.now(timezone.utc) + timedelta(hours=2)
+
+        moderation.ban_user(
+            tmp_session, mod, target, reason="spam", expires_at=expires,
+        )
+        tmp_session.commit()
+
+        assert target.ban_reason == "spam"
+        assert target.banned_until is not None
+        assert moderation.is_user_banned(target, now=expires - timedelta(seconds=1))
+        assert not moderation.is_user_banned(target, now=expires)
+        action = tmp_session.scalar(select(ModerationAction).where(
+            ModerationAction.action_type == "user_banned",
+        ))
+        assert action is not None
+        assert action.reason == "spam"
+
+    def test_moderator_cannot_enforce_against_staff(
+        self, tmp_session, four_users,
+    ):
+        moderator, peer = four_users[3], four_users[2]
+        peer.role = "moderator"
+
+        with pytest.raises(ValueError, match="insufficient_role"):
+            moderation.ban_user(tmp_session, moderator, peer, reason="other")
+
+    def test_admin_can_change_non_admin_role_and_action_is_audited(
+        self, tmp_session, four_users,
+    ):
+        target, admin = four_users[1], four_users[3]
+        admin.role = "admin"
+
+        moderation.change_role(
+            tmp_session, admin, target, new_role="moderator", reason="staffing",
+        )
+        tmp_session.commit()
+
+        assert target.role == "moderator"
+        action = tmp_session.scalar(select(ModerationAction).where(
+            ModerationAction.action_type == "role_changed",
+        ))
+        assert action.previous_state == "user"
+        assert action.new_state == "moderator"
+
+    def test_ledger_rows_reject_orm_update(self, tmp_session, four_users):
+        target, mod = four_users[1], four_users[3]
+        moderation.warn_user(tmp_session, mod, target, reason="spam")
+        tmp_session.commit()
+        action = tmp_session.scalar(select(ModerationAction))
+
+        action.reason = "rewritten"
+        with pytest.raises(ValueError, match="moderation_action_immutable"):
+            tmp_session.flush()
+
+    def test_ledger_rows_reject_raw_update_and_delete(
+        self, tmp_session, four_users,
+    ):
+        target, mod = four_users[1], four_users[3]
+        moderation.warn_user(tmp_session, mod, target, reason="spam")
+        tmp_session.commit()
+        action = tmp_session.scalar(select(ModerationAction))
+
+        with pytest.raises(DatabaseError, match="moderation_action_immutable"):
+            tmp_session.execute(text(
+                "UPDATE moderation_actions SET reason='rewritten' WHERE id=:id"
+            ), {"id": action.id})
+        tmp_session.rollback()
+        with pytest.raises(DatabaseError, match="moderation_action_immutable"):
+            tmp_session.execute(text(
+                "UPDATE moderation_actions SET target_user_id=NULL WHERE id=:id"
+            ), {"id": action.id})
+        tmp_session.rollback()
+        with pytest.raises(DatabaseError, match="moderation_action_immutable"):
+            tmp_session.execute(text(
+                "DELETE FROM moderation_actions WHERE id=:id"
+            ), {"id": action.id})
+
+    def test_report_target_hierarchy_is_enforced(
+        self, tmp_session, four_users, public_post,
+    ):
+        reporter, target, moderator = four_users[0], four_users[1], four_users[3]
+        target.role = "admin"
+        report = moderation.create_report(
+            tmp_session, reporter, target.id, reason="other", post_id=public_post.id,
+        )
+
+        with pytest.raises(ValueError, match="insufficient_role"):
+            moderation.resolve_report(tmp_session, moderator, report)
+
+    def test_target_delete_anonymizes_but_preserves_ledger(
+        self, tmp_session, four_users,
+    ):
+        target, mod = four_users[1], four_users[3]
+        moderation.warn_user(tmp_session, mod, target, reason="spam")
+        tmp_session.commit()
+        action_id = tmp_session.scalar(select(ModerationAction.id))
+
+        tmp_session.delete(target)
+        tmp_session.commit()
+
+        action = tmp_session.get(ModerationAction, action_id)
+        assert action is not None
+        assert action.target_user_id is None

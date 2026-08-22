@@ -26,6 +26,12 @@ class User(Base):
     """Core user record — identity, credentials, and basic profile."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user', 'moderator', 'admin')",
+            name="ck_users_role",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(
@@ -41,8 +47,26 @@ class User(Base):
     bio: Mapped[str | None] = mapped_column(default=None)
 
     # Moderation
-    is_moderator: Mapped[bool] = mapped_column(nullable=False, default=False)
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="user", server_default="user",
+    )
     banned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    banned_until: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None,
+    )
+    ban_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    banned_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    @property
+    def is_moderator(self) -> bool:
+        """Compatibility alias while callers migrate to the role contract."""
+        return self.role in {"moderator", "admin"}
+
+    @is_moderator.setter
+    def is_moderator(self, value: bool) -> None:
+        self.role = "moderator" if value else "user"
 
     # T-024: private account.  When set, the user's PUBLIC posts are visible
     # only to friends and ACTIVE followers, and following becomes a
@@ -566,6 +590,7 @@ class AuthSession(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(
@@ -594,6 +619,7 @@ class RefreshToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(
@@ -718,3 +744,165 @@ class Comment(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+class UserWarning(Base):
+    """User-visible moderation warning; audit history lives in the ledger."""
+
+    __tablename__ = "user_warnings"
+    __table_args__ = (
+        CheckConstraint("length(reason) BETWEEN 1 AND 120", name="ck_warning_reason"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    issued_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    report_id: Mapped[int | None] = mapped_column(
+        ForeignKey("reports.id", ondelete="SET NULL"), nullable=True,
+    )
+    reason: Mapped[str] = mapped_column(String(120), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ModerationAction(Base):
+    """Append-only security ledger for every moderator/admin mutation."""
+
+    __tablename__ = "moderation_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ("
+            "'warning_issued','user_banned','user_unbanned',"
+            "'report_resolved','report_dismissed','post_removed',"
+            "'comment_removed','role_changed')",
+            name="ck_moderation_action_type",
+        ),
+        CheckConstraint(
+            "resource_type IS NULL OR resource_type IN "
+            "('user','report','post','comment')",
+            name="ck_moderation_action_resource_type",
+        ),
+        Index("ix_moderation_actions_created_id", "created_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    actor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    target_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resource_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    resource_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    new_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+    )
+
+
+@event.listens_for(ModerationAction, "before_update")
+@event.listens_for(ModerationAction, "before_delete")
+def _prevent_moderation_action_mutation(*_args) -> None:
+    """Ledger rows are append-only through every ORM writer."""
+    raise ValueError("moderation_action_immutable")
+
+
+_LEDGER_SQLITE_UPDATE_TRIGGER = DDL("""
+CREATE TRIGGER trg_moderation_actions_no_update
+BEFORE UPDATE ON moderation_actions
+WHEN NOT (
+    (NEW.actor_id IS OLD.actor_id OR (
+        NEW.actor_id IS NULL AND OLD.actor_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.actor_id)
+    ))
+    AND (NEW.target_user_id IS OLD.target_user_id OR (
+        NEW.target_user_id IS NULL AND OLD.target_user_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.target_user_id)
+    ))
+    AND NEW.action_type IS OLD.action_type
+    AND NEW.reason IS OLD.reason
+    AND NEW.note IS OLD.note
+    AND NEW.resource_type IS OLD.resource_type
+    AND NEW.resource_id IS OLD.resource_id
+    AND NEW.previous_state IS OLD.previous_state
+    AND NEW.new_state IS OLD.new_state
+    AND NEW.created_at IS OLD.created_at
+)
+BEGIN
+    SELECT RAISE(ABORT, 'moderation_action_immutable');
+END
+""")
+_LEDGER_SQLITE_DELETE_TRIGGER = DDL("""
+CREATE TRIGGER trg_moderation_actions_no_delete
+BEFORE DELETE ON moderation_actions
+BEGIN
+    SELECT RAISE(ABORT, 'moderation_action_immutable');
+END
+""")
+_LEDGER_PG_FUNCTION = DDL("""
+CREATE FUNCTION protect_moderation_actions() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'moderation_action_immutable';
+    END IF;
+    IF (
+        (NEW.actor_id IS NOT DISTINCT FROM OLD.actor_id OR (
+            NEW.actor_id IS NULL AND OLD.actor_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.actor_id)
+        ))
+        AND (NEW.target_user_id IS NOT DISTINCT FROM OLD.target_user_id OR (
+            NEW.target_user_id IS NULL AND OLD.target_user_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.target_user_id)
+        ))
+        AND NEW.action_type IS NOT DISTINCT FROM OLD.action_type
+        AND NEW.reason IS NOT DISTINCT FROM OLD.reason
+        AND NEW.note IS NOT DISTINCT FROM OLD.note
+        AND NEW.resource_type IS NOT DISTINCT FROM OLD.resource_type
+        AND NEW.resource_id IS NOT DISTINCT FROM OLD.resource_id
+        AND NEW.previous_state IS NOT DISTINCT FROM OLD.previous_state
+        AND NEW.new_state IS NOT DISTINCT FROM OLD.new_state
+        AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at
+    ) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'moderation_action_immutable';
+END;
+$$ LANGUAGE plpgsql
+""")
+_LEDGER_PG_TRIGGER = DDL("""
+CREATE TRIGGER trg_moderation_actions_immutable
+BEFORE UPDATE OR DELETE ON moderation_actions
+FOR EACH ROW EXECUTE FUNCTION protect_moderation_actions()
+""")
+
+event.listen(
+    ModerationAction.__table__, "after_create",
+    _LEDGER_SQLITE_UPDATE_TRIGGER.execute_if(dialect="sqlite"),
+)
+event.listen(
+    ModerationAction.__table__, "after_create",
+    _LEDGER_SQLITE_DELETE_TRIGGER.execute_if(dialect="sqlite"),
+)
+event.listen(
+    ModerationAction.__table__, "after_create",
+    _LEDGER_PG_FUNCTION.execute_if(dialect="postgresql"),
+)
+event.listen(
+    ModerationAction.__table__, "after_create",
+    _LEDGER_PG_TRIGGER.execute_if(dialect="postgresql"),
+)
+event.listen(
+    ModerationAction.__table__, "after_drop",
+    DDL("DROP FUNCTION IF EXISTS protect_moderation_actions()")
+    .execute_if(dialect="postgresql"),
+)

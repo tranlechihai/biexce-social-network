@@ -83,6 +83,7 @@ class UserResponse(BaseModel):
     email: str
     display_name: str | None = None
     bio: str | None = None
+    role: Literal["user", "moderator", "admin"] = "user"
     # T-024: private accounts gate content on follower approval.
     is_private: bool = False
 
@@ -290,6 +291,71 @@ class ReportResponse(BaseModel):
     resolved_by: dict | None = None
     created_at: str | None = None
     resolved_at: str | None = None
+
+
+class WarningCreateRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=500)
+    report_id: int | None = Field(default=None, gt=0)
+
+
+class WarningResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    report_id: int | None = None
+    reason: str
+    note: str | None = None
+    created_at: datetime
+
+
+class BanCreateRequest(BaseModel):
+    user_id: int = Field(gt=0)
+    reason: str = Field(default="policy_violation", min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=500)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_has_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
+class BanResponse(BaseModel):
+    message: str
+    user_id: int
+    reason: str
+    banned_at: datetime
+    expires_at: datetime | None = None
+
+
+class RoleUpdateRequest(BaseModel):
+    role: Literal["user", "moderator", "admin"]
+    reason: str = Field(min_length=1, max_length=120)
+
+
+class RoleUpdateResponse(BaseModel):
+    user_id: int
+    role: Literal["user", "moderator", "admin"]
+
+
+class ModerationActionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor_id: int | None = None
+    target_user_id: int | None = None
+    action_type: str
+    reason: str | None = None
+    note: str | None = None
+    resource_type: str | None = None
+    resource_id: int | None = None
+    previous_state: str | None = None
+    new_state: str | None = None
+    created_at: datetime
 
 
 class CommentCreateRequest(BaseModel):

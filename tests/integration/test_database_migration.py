@@ -149,10 +149,11 @@ def _seed_post_graph(url: str) -> None:
     engine = create_engine(url)
     try:
         with engine.begin() as connection:
-            connection.execute(User.__table__.insert(), [
-                {"id": 1, "username": "alice", "email": "a@example.com", "password_hash": "h"},
-                {"id": 2, "username": "bob", "email": "b@example.com", "password_hash": "h"},
-            ])
+            connection.execute(text(
+                "INSERT INTO users (id,username,email,password_hash,is_moderator) "
+                "VALUES (1,'alice','a@example.com','h',false),"
+                "(2,'bob','b@example.com','h',false)"
+            ))
             connection.execute(Post.__table__.insert(), [
                 {"id": 1, "author_id": 1, "content": "hello world", "audience": "PUBLIC",
                  "created_at": now, "updated_at": now},
@@ -258,9 +259,10 @@ def test_0007_upgrade_fails_closed_on_orphan_posts(tmp_path: Path):
     engine = create_engine(url)
     try:
         with engine.begin() as connection:
-            connection.execute(User.__table__.insert(), [{
-                "id": 1, "username": "alice", "email": "a@example.com", "password_hash": "h",
-            }])
+            connection.execute(text(
+                "INSERT INTO users (id,username,email,password_hash,is_moderator) "
+                "VALUES (1,'alice','a@example.com','h',false)"
+            ))
             connection.execute(Post.__table__.insert(), [{
                 "id": 5, "author_id": 999, "content": "orphan", "audience": "PUBLIC",
                 "created_at": now, "updated_at": now,
@@ -298,14 +300,12 @@ def _seed_reports_at_0011(url: str, db_path: Path) -> tuple[int, int, int]:
     engine = create_engine(url)
     try:
         with engine.begin() as c:
-            c.execute(User.__table__.insert(), [
-                {"id": 1, "username": "rep_a", "email": "ra@x.com",
-                 "password_hash": "h"},
-                {"id": 2, "username": "rep_b", "email": "rb@x.com",
-                 "password_hash": "h"},
-                {"id": 3, "username": "rep_c", "email": "rc@x.com",
-                 "password_hash": "h"},
-            ])
+            c.execute(text(
+                "INSERT INTO users (id,username,email,password_hash,is_moderator) "
+                "VALUES (1,'rep_a','ra@x.com','h',false),"
+                "(2,'rep_b','rb@x.com','h',false),"
+                "(3,'rep_c','rc@x.com','h',false)"
+            ))
             c.execute(Post.__table__.insert(), [{
                 "id": 7, "author_id": 2, "content": "seed post",
                 "audience": "PUBLIC", "created_at": now, "updated_at": now,
@@ -362,6 +362,7 @@ def test_0012_sqlite_rebuild_and_dedup_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
+
     # Resolve the duplicate, then upgrade to head (0012): rebuild reports.
     con = sqlite3.connect(db_path)
     try:
@@ -369,7 +370,7 @@ def test_0012_sqlite_rebuild_and_dedup_roundtrip(tmp_path: Path):
         con.commit()
     finally:
         con.close()
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0012")
 
     con = sqlite3.connect(db_path)
     try:
@@ -439,7 +440,7 @@ def test_0012_sqlite_rebuild_and_dedup_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
-    # ...and re-upgrade returns to the 0012 shape.
+    # ...and re-upgrade returns to the current-head shape.
     _upgrade(url)
     con = sqlite3.connect(db_path)
     try:
@@ -806,7 +807,8 @@ def test_0015_preferences_and_unread_dedup_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
-    _upgrade(url)
+
+    _run(url, "upgrade", "20260822_0015")
     con = sqlite3.connect(db_path)
     try:
         assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
@@ -863,12 +865,84 @@ def test_0015_preferences_and_unread_dedup_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0015")
     con = sqlite3.connect(db_path)
     try:
         assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "20260822_0015"
         )
         assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 4
+    finally:
+        con.close()
+
+
+def test_0016_roles_warnings_ledger_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "moderator_roles.db"
+    url = f"sqlite:///{db_path}"
+    _run(url, "upgrade", "20260822_0015")
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "INSERT INTO users (id,username,email,password_hash,is_moderator) VALUES "
+            "(1,'old_user','ou@x.com','h',0),(2,'old_mod','om@x.com','h',1)"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0016"
+        )
+        assert con.execute("SELECT role FROM users ORDER BY id").fetchall() == [
+            ("user",), ("moderator",),
+        ]
+        assert "is_moderator" not in {
+            row[1] for row in con.execute("PRAGMA table_info(users)")
+        }
+        con.execute("UPDATE users SET role='admin' WHERE id=2")
+        con.execute(
+            "INSERT INTO user_warnings "
+            "(user_id,issued_by,reason,created_at) "
+            "VALUES (1,2,'spam',CURRENT_TIMESTAMP)"
+        )
+        con.execute(
+            "INSERT INTO moderation_actions "
+            "(actor_id,target_user_id,action_type,reason,resource_type,resource_id,created_at) "
+            "VALUES (2,1,'warning_issued','spam','user',1,CURRENT_TIMESTAMP)"
+        )
+        con.commit()
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+        for statement in (
+            "UPDATE moderation_actions SET reason='rewritten' WHERE id=1",
+            "UPDATE moderation_actions SET target_user_id=NULL WHERE id=1",
+            "DELETE FROM moderation_actions WHERE id=1",
+        ):
+            try:
+                con.execute(statement)
+                con.commit()
+                raise AssertionError("migration-owned ledger trigger allowed mutation")
+            except sqlite3.IntegrityError as exc:
+                assert "moderation_action_immutable" in str(exc)
+                con.rollback()
+    finally:
+        con.close()
+
+    _run(url, "downgrade", "20260822_0015")
+    con = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(users)")}
+        assert "role" not in columns
+        assert "is_moderator" in columns
+        assert con.execute(
+            "SELECT is_moderator FROM users WHERE id=2"
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN "
+            "('user_warnings','moderation_actions')"
+        ).fetchone()[0] == 0
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         con.close()

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ting_ting.models import Post, PostHashtag, PostMention, User
+from ting_ting.user_state import not_actively_banned_clause
 
 MAX_ENTITIES_PER_POST = 20
 HASHTAG_MAX = 64
@@ -106,7 +107,7 @@ def reconcile_post_entities(db: Session, post: Post) -> list[int]:
         users = db.scalars(
             select(User).where(
                 User.username.in_(usernames),
-                User.banned_at.is_(None),
+                not_actively_banned_clause(),
                 User.deactivated_at.is_(None),
             )
         ).all()
@@ -161,7 +162,7 @@ def post_entity_maps(
         .join(User, User.id == PostMention.mentioned_user_id)
         .where(
             PostMention.post_id.in_(post_ids),
-            User.banned_at.is_(None),
+            not_actively_banned_clause(),
             User.deactivated_at.is_(None),
         )
         .order_by(PostMention.id)

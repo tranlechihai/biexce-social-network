@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ting_ting.models import Block, Follow, FriendRequest, Mute, User
+from ting_ting.user_state import not_actively_banned_clause
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +758,7 @@ def search_users(
         User.id.not_in(
             select(Block.blocker_id).where(Block.blocked_id == viewer_id)
         ),
-        User.banned_at.is_(None),
+        not_actively_banned_clause(),
         User.deactivated_at.is_(None),  # T-023: self-deactivated users hide
     ]
 

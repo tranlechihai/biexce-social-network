@@ -31,6 +31,7 @@ from ting_ting.security import (
     request_rate_limit,
 )
 from ting_ting.config import get_settings
+from ting_ting.user_state import is_staff
 
 # Baseline CSP matched to the current Jinja2 templates (inline <script> and
 # style attributes are in use, so those two need 'unsafe-inline').  Tighten
@@ -201,8 +202,8 @@ async def _notification_badge(request: Request, call_next):
                 user = session.get(User, user_id)
                 if user is not None:
                     request.state.username = user.username
-                    request.state.user_is_moderator = bool(user.is_moderator)
-                    if user.is_moderator:
+                    request.state.user_is_moderator = is_staff(user)
+                    if is_staff(user):
                         request.state.pending_reports = int(
                             session.scalar(
                                 select(func.count()).select_from(Report).where(

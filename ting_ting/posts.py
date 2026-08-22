@@ -31,6 +31,7 @@ from ting_ting.models import (
     Block, Comment, FriendRequest, Like, Mute, Post,
     PostMedia, Repost, SavedPost, User, UserProfile,
 )
+from ting_ting.user_state import active_ban_clause, is_actively_banned
 from ting_ting import social
 
 
@@ -86,7 +87,7 @@ def is_visible_to(author_id: int, viewer_id: int, audience: str, db: Session) ->
     author = db.get(User, author_id)
     if (
         author is None
-        or author.banned_at is not None
+        or is_actively_banned(author)
         or author.deactivated_at is not None
     ):
         return False
@@ -274,7 +275,7 @@ def _muted_post_ids(viewer_id: int):
 
 def _banned_author_ids():
     """Subquery: banned user ids — their posts leave every viewer's feeds."""
-    return select(User.id).where(User.banned_at.is_not(None))
+    return select(User.id).where(active_ban_clause())
 
 
 def _deactivated_author_ids():

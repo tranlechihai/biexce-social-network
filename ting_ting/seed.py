@@ -95,7 +95,10 @@ def _preflight(engine) -> None:
         sys.exit(1)
 
     # 3) Schema compatibility — users table columns
-    required_cols = {"id", "username", "email", "password_hash", "display_name", "bio"}
+    required_cols = {
+        "id", "username", "email", "password_hash", "display_name", "bio",
+        "role", "banned_at", "banned_until", "ban_reason", "banned_by",
+    }
     existing_cols = {col["name"] for col in inspector.get_columns("users")}
     missing_cols = required_cols - existing_cols
     if missing_cols:

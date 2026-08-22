@@ -362,3 +362,13 @@ class TestT019AlembicAuthority:
         with pytest.raises(ValueError, match="notification dedup/order indexes are missing"):
             validate_and_initialize_schema(engine)
         engine.dispose()
+
+    def test_stamped_head_missing_moderation_ledger_index_fails_closed(self, tmp_path: Path):
+        engine = _create_test_engine(str(tmp_path / "head_missing_mod_ledger_index.db"))
+        validate_and_initialize_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP INDEX ix_moderation_actions_created_id"))
+
+        with pytest.raises(ValueError, match="role/ban/ledger artifacts are missing"):
+            validate_and_initialize_schema(engine)
+        engine.dispose()
