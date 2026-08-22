@@ -8,10 +8,18 @@
     <a href="/web/activity" {% if not activity_kind %}class="active" aria-current="page"{% endif %}>Tất cả</a>
     <a href="/web/activity?kind=like" {% if activity_kind == 'like' %}class="active" aria-current="page"{% endif %}>Lượt thích</a>
     <a href="/web/activity?kind=comment" {% if activity_kind == 'comment' %}class="active" aria-current="page"{% endif %}>Bình luận</a>
+    <a href="/web/activity?kind=repost" {% if activity_kind == 'repost' %}class="active" aria-current="page"{% endif %}>Đăng lại</a>
     <a href="/web/activity?kind=follow" {% if activity_kind == 'follow' %}class="active" aria-current="page"{% endif %}>Theo dõi</a>
     <a href="/web/activity?kind=follow_request" {% if activity_kind == 'follow_request' %}class="active" aria-current="page"{% endif %}>Mời theo dõi</a>
     <a href="/web/activity?kind=mention" {% if activity_kind == 'mention' %}class="active" aria-current="page"{% endif %}>Nhắc đến</a>
   </nav>
+  {% if aggregates %}<section class="activity-notices"><h2>TỔNG HỢP CHƯA ĐỌC</h2>
+    {% for item in aggregates %}<article class="activity-notice unread">
+      <a class="notice-avatar" href="/web/profile/{{ item.actor.username }}"><span class="avatar avatar-md">{{ (item.actor.display_name or item.actor.username)[0]|upper }}</span></a>
+      <a class="notice-copy" href="/web/feed#post-{{ item.post_id }}"><span><strong>{{ item.actor.display_name or item.actor.username }}</strong>{% if item.actor_count > 1 %} và {{ item.actor_count - 1 }} người khác{% endif %}{% if item.kind == 'like' %} đã thích bài viết của bạn ({{ item.event_count }} lượt).{% elif item.kind == 'comment' %} đã bình luận bài viết của bạn ({{ item.event_count }} bình luận).{% else %} đã đăng lại bài viết của bạn ({{ item.event_count }} lượt).{% endif %}</span><time>{{ item.created_at.strftime('%d/%m · %H:%M') }}</time></a>
+      <form action="/web/activity/aggregates/{{ item.aggregation_key }}/read" method="post" class="notice-read-form"><button type="submit" class="notice-read-btn">Đã đọc nhóm</button></form>
+    </article>{% endfor %}
+  </section>{% endif %}
   <section class="activity-notices">
     {% if activities %}<h2>GẦN ĐÂY</h2>{% endif %}
     {% for item in activities %}

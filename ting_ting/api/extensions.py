@@ -294,7 +294,10 @@ def _toggle_post_feature(db: Session, model, me: User, post_id: int, active: boo
                 new_row = model(user_id=me.id, post_id=post.id)
                 db.add(new_row)
                 if model is Repost:
-                    notifications.record(db, post.author_id, me.id, "repost", post.id)
+                    notifications.record(
+                        db, post.author_id, me.id, "repost", post.id,
+                        source_key=f"post:{post.id}",
+                    )
                 db.flush()
         except IntegrityError:
             # Concurrent duplicate toggle — converge to the existing row.

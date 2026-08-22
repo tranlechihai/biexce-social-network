@@ -113,7 +113,10 @@ def like_post(
     _require_post_visible(db, post, me.id)
 
     interactions.create_like(db, me.id, post)
-    notifications.record(db, post.author_id, me.id, "like", post.id)
+    notifications.record(
+        db, post.author_id, me.id, "like", post.id,
+        source_key=f"post:{post.id}",
+    )
     db.commit()
     db.refresh(post)
     return _post_response(db, post, viewer_id=me.id)
@@ -177,7 +180,10 @@ def create_comment_endpoint(
         if parent is not None:
             recipient_ids.add(parent.author_id)
     for recipient_id in recipient_ids:
-        notifications.record(db, recipient_id, me.id, "comment", post.id)
+        notifications.record(
+            db, recipient_id, me.id, "comment", post.id,
+            source_key=f"comment:{comment.id}",
+        )
     db.commit()
     db.refresh(comment)
     return _comment_response(db, comment)

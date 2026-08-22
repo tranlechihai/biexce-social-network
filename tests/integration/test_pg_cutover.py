@@ -126,6 +126,24 @@ def test_p014_native_search_index_present(pg_engine):
         assert "to_tsvector('simple'" in definition
 
 
+def test_p015_notification_preferences_and_dedup_indexes(pg_engine):
+    with pg_engine.connect() as conn:
+        assert "notification_preferences" in _public_tables(pg_engine)
+        indexes = {
+            row[0]: row[1]
+            for row in conn.execute(text(
+                "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' "
+                "AND indexname IN ('ux_activities_unread_dedup',"
+                "'ix_activities_user_created_id')"
+            ))
+        }
+        assert set(indexes) == {
+            "ux_activities_unread_dedup", "ix_activities_user_created_id",
+        }
+        assert "UNIQUE" in indexes["ux_activities_unread_dedup"]
+        assert "source_key IS NOT NULL" in indexes["ux_activities_unread_dedup"]
+
+
 def test_startup_refuses_unmanaged_database(pg_engine):
     """Tables without an alembic_version stamp -> fail closed (no mutation)."""
     from ting_ting.database import _alembic_head_revision, validate_and_initialize_schema
@@ -363,6 +381,13 @@ def test_api_smoke_on_postgres(pg_engine):
         assert tagged.status_code == 200, tagged.text
         assert [item["id"] for item in tagged.json()] == [post_id]
 
+        preferences = client.get("/api/v1/notifications/preferences")
+        assert preferences.status_code == 200 and preferences.json()["comment"] is True
+        patched = client.patch(
+            "/api/v1/notifications/preferences", json={"repost": False},
+        )
+        assert patched.status_code == 200 and patched.json()["repost"] is False
+
         # A follow must persist across requests (commit semantics hold on PG).
         stranger = client.post(
             "/api/v1/auth/register",
@@ -388,6 +413,32 @@ def test_api_smoke_on_postgres(pg_engine):
         with pg_engine.connect() as conn:
             follow_rows = conn.execute(text("SELECT COUNT(*) FROM follows")).scalar_one()
         assert follow_rows >= 1
+
+        # Real PG aggregation + source-key uniqueness path: distinct comments
+        # from one actor are separate events in one unread group.
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"identifier": "pgstranger", "password": "password123"},
+        ).status_code == 200
+        for content in ("pg comment one", "pg comment two"):
+            commented = client.post(
+                f"/api/v1/posts/{post_id}/comments", json={"content": content},
+            )
+            assert commented.status_code == 201, commented.text
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"identifier": "pguser", "password": "password123"},
+        ).status_code == 200
+        groups = client.get("/api/v1/notifications/aggregates")
+        assert groups.status_code == 200, groups.text
+        comment_group = next(
+            item for item in groups.json()["items"] if item["kind"] == "comment"
+        )
+        assert comment_group["event_count"] == 2
+        marked = client.post(
+            f"/api/v1/notifications/aggregates/{comment_group['aggregation_key']}/read"
+        )
+        assert marked.status_code == 200 and marked.json()["updated"] == 2
 
         ready = client.get("/ready")
         assert ready.status_code == 200 and ready.json()["database"] == "ok"

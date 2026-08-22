@@ -352,3 +352,13 @@ class TestT019AlembicAuthority:
         with pytest.raises(ValueError, match="search artifacts are missing"):
             validate_and_initialize_schema(engine)
         engine.dispose()
+
+    def test_stamped_head_missing_notification_dedup_index_fails_closed(self, tmp_path: Path):
+        engine = _create_test_engine(str(tmp_path / "head_missing_notification_index.db"))
+        validate_and_initialize_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP INDEX ux_activities_unread_dedup"))
+
+        with pytest.raises(ValueError, match="notification dedup/order indexes are missing"):
+            validate_and_initialize_schema(engine)
+        engine.dispose()

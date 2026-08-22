@@ -104,6 +104,47 @@ class TestRecord:
         db.commit()
         assert row.post_id is None
 
+    def test_distinct_comment_sources_are_not_collapsed(self, db, users, post):
+        first = notifications.record(
+            db, users[0].id, users[1].id, "comment", post.id,
+            source_key="comment:1",
+        )
+        second = notifications.record(
+            db, users[0].id, users[1].id, "comment", post.id,
+            source_key="comment:2",
+        )
+        assert first.id != second.id
+
+
+class TestPreferences:
+
+    def test_missing_row_defaults_all_enabled(self, db, users):
+        values = notifications.get_preferences(db, users[0].id)
+        assert set(values) == set(notifications.NOTIFICATION_KINDS)
+        assert all(values.values())
+
+    def test_partial_update_gates_future_events_not_history(self, db, users, post):
+        existing = notifications.record(
+            db, users[0].id, users[1].id, "like", post.id,
+            source_key="post:old",
+        )
+        notifications.update_preferences(db, users[0].id, {"like": False})
+        assert notifications.record(
+            db, users[0].id, users[2].id, "like", post.id,
+            source_key="post:new",
+        ) is None
+        assert notifications.record(
+            db, users[0].id, users[2].id, "comment", post.id,
+            source_key="comment:1",
+        ) is not None
+        assert db.get(Activity, existing.id) is not None
+
+        notifications.update_preferences(db, users[0].id, {"like": True})
+        assert notifications.record(
+            db, users[0].id, users[2].id, "like", post.id,
+            source_key="post:new",
+        ) is not None
+
 
 # ---------------------------------------------------------------------------
 # list + cursor pagination
@@ -215,6 +256,41 @@ class TestReadState:
         assert all(r.read_at is not None for r in rows)
 
 
+class TestAggregation:
+
+    def test_group_counts_actors_events_and_cutoff_read(self, db, users, post):
+        alice, bob, carol = users
+        notifications.record(
+            db, alice.id, bob.id, "comment", post.id, source_key="comment:1",
+        )
+        notifications.record(
+            db, alice.id, bob.id, "comment", post.id, source_key="comment:2",
+        )
+        notifications.record(
+            db, alice.id, carol.id, "comment", post.id, source_key="comment:3",
+        )
+        db.commit()
+
+        groups = notifications.list_aggregates(db, alice.id)
+        assert len(groups) == 1
+        group = groups[0]
+        assert group.kind == "comment" and group.post_id == post.id
+        assert group.actor_count == 2 and group.event_count == 3
+        assert {u.id for u in group.actors} == {bob.id, carol.id}
+
+        # Event arriving after the aggregate was rendered must stay unread.
+        later = notifications.record(
+            db, alice.id, carol.id, "comment", post.id, source_key="comment:4",
+        )
+        db.commit()
+        assert notifications.mark_aggregate_read(
+            db, alice.id, group.aggregation_key,
+        ) == 3
+        db.commit()
+        assert later.read_at is None
+        assert notifications.unread_count(db, alice.id) == 1
+
+
 # ---------------------------------------------------------------------------
 # Integrity constraints
 # ---------------------------------------------------------------------------
@@ -256,3 +332,28 @@ class TestIntegrity:
         assert db.scalar(select(Like.id).where(Like.post_id == post_id)) is None
         assert db.scalar(select(Comment.id).where(Comment.post_id == post_id)) is None
         assert db.scalar(select(Activity.id).where(Activity.post_id == post_id)) is None
+
+    def test_unread_source_key_unique_but_read_history_allowed(self, db, users, post):
+        first = Activity(
+            user_id=users[0].id, actor_id=users[1].id, kind="like",
+            post_id=post.id, source_key="post:unique",
+        )
+        db.add(first)
+        db.commit()
+        db.add(Activity(
+            user_id=users[0].id, actor_id=users[1].id, kind="like",
+            post_id=post.id, source_key="post:unique",
+        ))
+        with pytest.raises(IntegrityError):
+            db.flush()
+        db.rollback()
+
+        first = db.get(Activity, first.id)
+        from datetime import datetime, timezone
+        first.read_at = datetime.now(timezone.utc)
+        db.commit()
+        db.add(Activity(
+            user_id=users[0].id, actor_id=users[1].id, kind="like",
+            post_id=post.id, source_key="post:unique",
+        ))
+        db.commit()

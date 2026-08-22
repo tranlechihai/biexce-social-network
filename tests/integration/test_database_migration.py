@@ -675,7 +675,7 @@ def test_0014_entities_fts_and_downgrade_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0014")
     con = sqlite3.connect(db_path)
     try:
         assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
@@ -763,7 +763,7 @@ def test_0014_entities_fts_and_downgrade_roundtrip(tmp_path: Path):
     finally:
         con.close()
 
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0014")
     con = sqlite3.connect(db_path)
     try:
         assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
@@ -774,5 +774,101 @@ def test_0014_entities_fts_and_downgrade_roundtrip(tmp_path: Path):
             "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'Historical'"
         ).fetchall() == [(1,)]
         assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        con.close()
+
+# ---------------------------------------------------------------------------
+# 0015 — notification preferences + unread source-key dedup
+# ---------------------------------------------------------------------------
+
+def test_0015_preferences_and_unread_dedup_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "notification_prefs.db"
+    url = f"sqlite:///{db_path}"
+    _run(url, "upgrade", "20260822_0014")
+    now_sql = datetime.now(timezone.utc).replace(microsecond=0).isoformat(sep=" ")
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "INSERT INTO users (id, username, email, password_hash) VALUES "
+            "(1,'np_owner','npo@x.com','h'),(2,'np_actor','npa@x.com','h')"
+        )
+        con.execute(
+            "INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+            f"VALUES (1,1,'notification migration','PUBLIC','{now_sql}','{now_sql}')"
+        )
+        # Historical duplicate-shaped rows remain legal because 0015 leaves
+        # source_key NULL instead of inventing event identities retroactively.
+        con.execute(
+            "INSERT INTO activities (id,user_id,actor_id,kind,post_id,created_at) VALUES "
+            f"(1,1,2,'comment',1,'{now_sql}'),(2,1,2,'comment',1,'{now_sql}')"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0015"
+        )
+        assert con.execute("SELECT source_key FROM activities ORDER BY id").fetchall() == [
+            (None,), (None,),
+        ]
+        con.execute("INSERT INTO notification_preferences (user_id) VALUES (1)")
+        assert con.execute(
+            "SELECT follow_enabled,like_enabled,comment_enabled,mention_enabled "
+            "FROM notification_preferences WHERE user_id=1"
+        ).fetchone() == (1, 1, 1, 1)
+        indexes = {r[1] for r in con.execute("PRAGMA index_list(activities)")}
+        assert {"ux_activities_unread_dedup", "ix_activities_user_created_id"} <= indexes
+
+        con.execute(
+            "INSERT INTO activities "
+            "(id,user_id,actor_id,kind,post_id,source_key,created_at) VALUES "
+            f"(3,1,2,'like',1,'post:1','{now_sql}')"
+        )
+        con.commit()
+        try:
+            con.execute(
+                "INSERT INTO activities "
+                "(id,user_id,actor_id,kind,post_id,source_key,created_at) VALUES "
+                f"(4,1,2,'like',1,'post:1','{now_sql}')"
+            )
+            con.commit()
+            raise AssertionError("duplicate unread source key accepted")
+        except sqlite3.IntegrityError:
+            con.rollback()
+        con.execute("UPDATE activities SET read_at=:now WHERE id=3", {"now": now_sql})
+        con.execute(
+            "INSERT INTO activities "
+            "(id,user_id,actor_id,kind,post_id,source_key,created_at) VALUES "
+            f"(4,1,2,'like',1,'post:1','{now_sql}')"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _run(url, "downgrade", "20260822_0014")
+    con = sqlite3.connect(db_path)
+    try:
+        assert "source_key" not in {
+            row[1] for row in con.execute("PRAGMA table_info(activities)")
+        }
+        assert con.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='notification_preferences'"
+        ).fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 4
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        con.close()
+
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0015"
+        )
+        assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 4
     finally:
         con.close()

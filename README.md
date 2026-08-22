@@ -185,6 +185,16 @@ and refuses a non-empty target.
   `PostResponse` includes normalized `mentions` and `hashtags`; a newly added
   visible `@username` creates a `mention` notification. Web discovery is at
   `/web/search`, with escaped server-side mention/hashtag links.
+- Notification controls (T-027): `GET/PATCH
+  /api/v1/notifications/preferences` reads or partially updates the six
+  per-kind creation preferences (`follow`, `follow_request`, `like`,
+  `comment`, `repost`, `mention`); missing preferences default to enabled and
+  changes affect future events only. `GET /api/v1/notifications/aggregates`
+  groups current unread likes/comments/reposts by post without changing the
+  raw `/notifications` contract. Mark a rendered group with `POST
+  /api/v1/notifications/aggregates/{aggregation_key}/read`; the key carries a
+  cutoff, so events arriving afterward remain unread. Account settings expose
+  the same preferences on the web.
 - Observability: `GET /health` (liveness), `GET /ready` (DB check, 503 when
   down), `GET /metrics` (Prometheus text). Every response carries
   `X-Request-ID`, matching the one-line access log (`rid=... path -> status`).

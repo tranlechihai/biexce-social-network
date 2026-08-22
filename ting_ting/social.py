@@ -104,8 +104,11 @@ def request_follow(
                 follower_id=follower.id, followed_id=target.id, status=status,
             )
             db.add(follow)
-            notifications.record(db, target.id, follower.id, kind)
             db.flush()
+            notifications.record(
+                db, target.id, follower.id, kind,
+                source_key=f"follow:{follow.id}",
+            )
     except IntegrityError:
         # Concurrent same-pair follow won the uq_follow_pair race (or the
         # target switched public→private between our read and insert).  The
@@ -150,7 +153,10 @@ def approve_follow_request(
 
     follow.status = "active"
     db.flush()
-    notifications.record(db, follow.follower_id, by_user.id, "follow")
+    notifications.record(
+        db, follow.follower_id, by_user.id, "follow",
+        source_key=f"follow:{follow.id}",
+    )
     db.flush()
     return follow
 
@@ -253,7 +259,10 @@ def apply_privacy_change(
     ).scalars().all()
     for follow in pending:
         follow.status = "active"
-        notifications.record(db, follow.follower_id, user.id, "follow")
+        notifications.record(
+            db, follow.follower_id, user.id, "follow",
+            source_key=f"follow:{follow.id}",
+        )
     db.flush()
     return user
 

@@ -57,7 +57,8 @@ class TestExport:
         assert all(k in doc for k in (
             "user", "profile", "posts", "comments", "liked_post_ids",
             "saved_post_ids", "reposted_post_ids", "following_user_ids",
-            "follower_user_ids", "notifications", "exported_at",
+            "follower_user_ids", "notifications", "notification_preferences",
+            "exported_at",
         ))
 
     def test_export_includes_comments_and_follows(self, client, tmp_engine):

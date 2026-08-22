@@ -141,6 +141,14 @@ class Activity(Base):
             "kind IN ('follow','like','comment','repost','follow_request','mention')",
             name="ck_activity_kind",
         ),
+        Index(
+            "ux_activities_unread_dedup",
+            "user_id", "actor_id", "kind", "source_key",
+            unique=True,
+            sqlite_where=text("read_at IS NULL AND source_key IS NOT NULL"),
+            postgresql_where=text("read_at IS NULL AND source_key IS NOT NULL"),
+        ),
+        Index("ix_activities_user_created_id", "user_id", "created_at", "id"),
     )
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
@@ -149,8 +157,46 @@ class Activity(Base):
     post_id: Mapped[int | None] = mapped_column(
         ForeignKey("posts.id", ondelete="CASCADE"), nullable=True,
     )
+    # Deterministic event identity used by the unread partial unique index.
+    # Nullable preserves historical rows and backwards-compatible callers.
+    source_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
+
+class NotificationPreference(Base):
+    """Per-user notification creation preferences (T-027).
+
+    A missing row means every kind is enabled. Preferences gate only future
+    rows; existing notification history is never deleted or hidden.
+    """
+
+    __tablename__ = "notification_preferences"
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
+    )
+    follow_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    follow_request_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    like_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    comment_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    repost_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    mention_enabled: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
 
 
 class SavedPost(Base):

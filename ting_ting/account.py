@@ -115,6 +115,8 @@ def export_account(db: Session, user: User) -> dict:
         ).all()
     ]
 
+    from ting_ting import notifications as notification_service
+
     return {
         "user": {
             "id": user.id,
@@ -141,6 +143,7 @@ def export_account(db: Session, user: User) -> dict:
         "following_user_ids": following,
         "follower_user_ids": followers,
         "notifications": activities,
+        "notification_preferences": notification_service.get_preferences(db, user.id),
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }
 

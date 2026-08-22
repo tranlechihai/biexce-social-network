@@ -134,7 +134,10 @@ def create_post(db: Session, author_id: int, content: str, audience: str) -> Pos
         from ting_ting import notifications
         for target_id in new_mentions:
             if is_visible_to(post.author_id, target_id, post.audience, db):
-                notifications.record(db, target_id, post.author_id, "mention", post.id)
+                notifications.record(
+                    db, target_id, post.author_id, "mention", post.id,
+                    source_key=f"post:{post.id}",
+                )
     return post
 
 
@@ -162,6 +165,7 @@ def edit_post(db: Session, post: Post, by_user_id: int,
                 if is_visible_to(post.author_id, target_id, post.audience, db):
                     notifications.record(
                         db, target_id, post.author_id, "mention", post.id,
+                        source_key=f"post:{post.id}",
                     )
     return post
 

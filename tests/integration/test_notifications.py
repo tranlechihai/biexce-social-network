@@ -327,3 +327,103 @@ class TestWebActivityReadState:
         resp = client.get("/web/activity")
         assert "1 chưa đọc" not in resp.text
         assert "notice-read-form" not in resp.text
+
+
+class TestNotificationPreferences:
+
+    def test_api_defaults_partial_patch_and_writer_gate(self, client):
+        register(client, "pref_owner")
+        register(client, "pref_actor")
+        login(client, "pref_owner")
+        defaults = client.get("/api/notifications/preferences")
+        assert defaults.status_code == 200
+        assert defaults.json() == {
+            "follow": True, "follow_request": True, "like": True,
+            "comment": True, "repost": True, "mention": True,
+        }
+        post_id = client.post("/api/posts", json={
+            "content": "preferences", "audience": "PUBLIC",
+        }).json()["id"]
+        patched = client.patch("/api/notifications/preferences", json={"like": False})
+        assert patched.status_code == 200 and patched.json()["like"] is False
+        assert patched.json()["comment"] is True
+        assert client.patch(
+            "/api/notifications/preferences", json={"unknown": False},
+        ).status_code == 422
+
+        login(client, "pref_actor")
+        client.post(f"/api/posts/{post_id}/likes")
+        client.post(f"/api/posts/{post_id}/comments", json={"content": "still on"})
+        login(client, "pref_owner")
+        items = client.get("/api/notifications").json()["items"]
+        assert [item["kind"] for item in items] == ["comment"]
+
+    def test_web_form_persists_all_checkbox_states(self, client):
+        register(client, "pref_web")
+        login(client, "pref_web")
+        response = client.post(
+            "/web/account/notifications",
+            data={"follow": "on", "comment": "on", "mention": "on"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        values = client.get("/api/notifications/preferences").json()
+        assert values == {
+            "follow": True, "follow_request": False, "like": False,
+            "comment": True, "repost": False, "mention": True,
+        }
+        page = client.get("/web/account")
+        assert page.status_code == 200
+        assert 'name="comment" checked' in page.text
+
+
+class TestNotificationAggregation:
+
+    def test_opt_in_aggregate_and_cutoff_read_preserve_raw_contract(self, client):
+        register(client, "agg_owner")
+        register(client, "agg_bob")
+        register(client, "agg_carol")
+        login(client, "agg_owner")
+        post_id = client.post("/api/posts", json={
+            "content": "aggregate", "audience": "PUBLIC",
+        }).json()["id"]
+        login(client, "agg_bob")
+        client.post(f"/api/posts/{post_id}/comments", json={"content": "one"})
+        client.post(f"/api/posts/{post_id}/comments", json={"content": "two"})
+        login(client, "agg_carol")
+        client.post(f"/api/posts/{post_id}/comments", json={"content": "three"})
+
+        login(client, "agg_owner")
+        raw = client.get("/api/notifications", params={"kind": "comment"}).json()
+        assert len(raw["items"]) == 3
+        aggregates = client.get("/api/notifications/aggregates").json()["items"]
+        group = next(item for item in aggregates if item["kind"] == "comment")
+        assert group["event_count"] == 3 and group["actor_count"] == 2
+        assert len(group["actors"]) == 2
+        web_page = client.get("/web/activity")
+        assert "TỔNG HỢP CHƯA ĐỌC" in web_page.text
+        assert "3 bình luận" in web_page.text
+
+        login(client, "agg_carol")
+        client.post(f"/api/posts/{post_id}/comments", json={"content": "later"})
+        login(client, "agg_owner")
+        marked = client.post(
+            f"/api/notifications/aggregates/{group['aggregation_key']}/read"
+        )
+        assert marked.status_code == 200 and marked.json()["updated"] == 3
+        assert client.get("/api/notifications/unread-count").json() == {"unread": 1}
+        assert client.post("/api/notifications/aggregates/not-valid/read").status_code == 404
+
+    def test_follow_request_stays_actionable_and_unaggregated(self, client):
+        owner = register(client, "agg_private")
+        register(client, "agg_follower")
+        login(client, "agg_private")
+        client.patch("/api/profile/me", json={"is_private": True})
+        login(client, "agg_follower")
+        client.put(f"/api/social/follows/{owner['id']}")
+        login(client, "agg_private")
+        assert client.get("/api/notifications/aggregates").json()["items"] == []
+        raw = client.get(
+            "/api/notifications", params={"kind": "follow_request"},
+        ).json()["items"]
+        assert len(raw) == 1

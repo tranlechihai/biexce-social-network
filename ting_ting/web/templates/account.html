@@ -12,6 +12,26 @@
 
 <div class="settings-divider"></div>
 
+<form class="form" action="/web/account/notifications" method="post">
+    <h2>Tùy chọn thông báo</h2>
+    <p class="session-hint">Áp dụng cho thông báo mới; lịch sử hiện tại không bị xóa.</p>
+    {% if preferences_saved %}<p class="form-success" role="status">Đã lưu tùy chọn thông báo.</p>{% endif %}
+    {% set pref_labels = {
+      'follow': 'Người mới theo dõi',
+      'follow_request': 'Yêu cầu theo dõi tài khoản riêng tư',
+      'like': 'Lượt thích bài viết',
+      'comment': 'Bình luận và trả lời',
+      'repost': 'Đăng lại bài viết',
+      'mention': 'Nhắc đến trong bài viết'
+    } %}
+    {% for kind, label in pref_labels.items() %}
+    <label class="checkbox-line"><input type="checkbox" name="{{ kind }}" {% if notification_preferences and notification_preferences[kind] %}checked{% endif %}> {{ label }}</label>
+    {% endfor %}
+    <button type="submit" class="btn btn-primary">Lưu tùy chọn</button>
+</form>
+
+<div class="settings-divider"></div>
+
 {% if is_deactivated %}
 <form class="form" action="/web/account/reactivate" method="post">
     <h2>Tài khoản đang bị vô hiệu hóa</h2>

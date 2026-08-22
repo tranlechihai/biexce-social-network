@@ -463,6 +463,25 @@ async def account_page(
     return _render(
         "account.html", request, username=me.username, active="profile",
         is_deactivated=me.deactivated_at is not None,
+        notification_preferences=notifications.get_preferences(db, me.id),
+        preferences_saved=request.query_params.get("preferences_saved") == "1",
+    )
+
+
+@router.post("/account/notifications")
+async def account_notification_preferences_submit(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    form = await request.form()
+    changes = {
+        kind: kind in form for kind in notifications.NOTIFICATION_KINDS
+    }
+    notifications.update_preferences(db, me.id, changes)
+    db.commit()
+    return RedirectResponse(
+        url="/web/account?preferences_saved=1", status_code=303,
     )
 
 
@@ -1287,7 +1306,9 @@ async def unfollow_submit(request: Request, db: Session = Depends(get_db), me: U
 @router.get("/activity")
 async def activity_page(request: Request, db: Session = Depends(get_db), me: User = Depends(get_current_user_web)):
     activity_kind = request.query_params.get("kind", "")
-    if activity_kind not in {"like", "comment", "follow", "follow_request", "mention"}:
+    if activity_kind not in {
+        "like", "comment", "repost", "follow", "follow_request", "mention",
+    }:
         activity_kind = ""
     rows, _ = notifications.list_notifications(
         db, me.id, limit=100, kind=activity_kind or None,
@@ -1322,12 +1343,43 @@ async def activity_page(request: Request, db: Session = Depends(get_db), me: Use
                 "follow_request_id": follow_request_id,
                 "is_read": row.read_at is not None,
             })
+    aggregate_items = []
+    if not activity_kind or activity_kind in notifications.AGGREGATED_KINDS:
+        for group in notifications.list_aggregates(db, me.id, limit=20):
+            if activity_kind and group.kind != activity_kind:
+                continue
+            if not group.actors:
+                continue
+            aggregate_items.append({
+                "kind": group.kind,
+                "post_id": group.post_id,
+                "actor": _user_summary(db, group.actors[0]),
+                "actor_count": group.actor_count,
+                "event_count": group.event_count,
+                "aggregation_key": group.aggregation_key,
+                "created_at": group.latest.created_at,
+            })
     return _render(
         "activity.html", request, username=me.username, active="activity",
         activities=items, activity_kind=activity_kind,
         unread_count=notifications.unread_count(db, me.id),
+        aggregates=aggregate_items,
         suggestions=_people_context(db, me)["people"][:5],
     )
+
+
+@router.post("/activity/aggregates/{aggregation_key}/read")
+async def activity_aggregate_mark_read(
+    aggregation_key: str,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    try:
+        notifications.mark_aggregate_read(db, me.id, aggregation_key)
+    except ValueError:
+        pass
+    db.commit()
+    return RedirectResponse(url="/web/activity", status_code=303)
 
 
 @router.post("/social/follow-requests/{request_id}/approve")
@@ -1444,7 +1496,10 @@ async def repost_submit(post_id: int, db: Session = Depends(get_db), me: User = 
             db.delete(row)
         else:
             db.add(Repost(user_id=me.id, post_id=post_id))
-            notifications.record(db, post.author_id, me.id, "repost", post_id)
+            notifications.record(
+                db, post.author_id, me.id, "repost", post_id,
+                source_key=f"post:{post_id}",
+            )
         db.commit()
     return RedirectResponse(url="/web/feed", status_code=303)
 
@@ -1464,7 +1519,10 @@ async def like_submit(
         return RedirectResponse(url="/web/feed", status_code=303)
 
     create_like(db, me.id, post)
-    notifications.record(db, post.author_id, me.id, "like", post.id)
+    notifications.record(
+        db, post.author_id, me.id, "like", post.id,
+        source_key=f"post:{post.id}",
+    )
     db.commit()
     return RedirectResponse(url="/web/feed", status_code=303)
 
@@ -1559,7 +1617,10 @@ async def comment_submit(
         if parent is not None:
             recipient_ids.add(parent.author_id)
     for recipient_id in recipient_ids:
-        notifications.record(db, recipient_id, me.id, "comment", post.id)
+        notifications.record(
+            db, recipient_id, me.id, "comment", post.id,
+            source_key=f"comment:{comment.id}",
+        )
     db.commit()
     return RedirectResponse(url="/web/feed", status_code=303)
 

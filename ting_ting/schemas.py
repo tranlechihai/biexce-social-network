@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +437,46 @@ class NotificationResponse(BaseModel):
 class NotificationListResponse(BaseModel):
     items: list[NotificationResponse]
     next_cursor: str | None = None
+
+
+class NotificationPreferencesResponse(BaseModel):
+    follow: bool = True
+    follow_request: bool = True
+    like: bool = True
+    comment: bool = True
+    repost: bool = True
+    mention: bool = True
+
+
+class NotificationPreferencesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    follow: StrictBool | None = None
+    follow_request: StrictBool | None = None
+    like: StrictBool | None = None
+    comment: StrictBool | None = None
+    repost: StrictBool | None = None
+    mention: StrictBool | None = None
+
+
+class NotificationAggregateResponse(BaseModel):
+    id: int
+    actor: UserRef
+    actors: list[UserRef]
+    actor_count: int
+    event_count: int
+    kind: str
+    post_id: int
+    created_at: str | None = None
+    aggregation_key: str
+
+
+class NotificationAggregateListResponse(BaseModel):
+    items: list[NotificationAggregateResponse]
+
+
+class AggregateReadResponse(BaseModel):
+    updated: int
 
 
 class UnreadCountResponse(BaseModel):

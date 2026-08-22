@@ -223,6 +223,7 @@ _LEGACY_REQUIRED_FK_ACTIONS = (
     ("post_mentions", "post_id", "posts", "CASCADE"),
     ("post_mentions", "mentioned_user_id", "users", "CASCADE"),
     ("post_hashtags", "post_id", "posts", "CASCADE"),
+    ("notification_preferences", "user_id", "users", "CASCADE"),
     ("sessions", "user_id", "users", "CASCADE"),
     ("reports", "post_id", "posts", "SET NULL"),
     ("reports", "comment_id", "comments", "SET NULL"),
@@ -270,7 +271,11 @@ def _legacy_schema_matches_head(engine: Engine) -> bool:
             any(c in sql for sql in create_sql.values())
             for c in _LEGACY_REQUIRED_CHECK_CONSTRAINTS
         )
-        return checks_ok and _search_artifacts_present(engine)
+        return (
+            checks_ok
+            and _search_artifacts_present(engine)
+            and _notification_artifacts_present(engine)
+        )
     except Exception:
         # Introspection failure is drift from our point of view — fail closed.
         return False
@@ -327,6 +332,39 @@ def _require_search_artifacts(engine: Engine) -> None:
         raise ValueError(
             "Database is stamped at head but native post-search artifacts are missing. "
             "Restore the T-026 FTS table/triggers or PostgreSQL GIN index before startup."
+        )
+
+
+def _notification_artifacts_present(engine: Engine) -> bool:
+    required = {"ux_activities_unread_dedup", "ix_activities_user_created_id"}
+    try:
+        with engine.connect() as conn:
+            if engine.name == "sqlite":
+                names = {
+                    row[0] for row in conn.execute(text(
+                        "SELECT name FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name='activities'"
+                    ))
+                }
+            elif engine.name == "postgresql":
+                names = {
+                    row[0] for row in conn.execute(text(
+                        "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() "
+                        "AND tablename='activities'"
+                    ))
+                }
+            else:
+                return False
+        return required <= names
+    except Exception:
+        return False
+
+
+def _require_notification_artifacts(engine: Engine) -> None:
+    if not _notification_artifacts_present(engine):
+        raise ValueError(
+            "Database is stamped at head but T-027 notification dedup/order "
+            "indexes are missing. Restore them before startup."
         )
 
 
@@ -395,6 +433,7 @@ def validate_and_initialize_schema(
             )
         _require_head(engine)
         _require_search_artifacts(engine)
+        _require_notification_artifacts(engine)
         return engine
 
     # --- SQLite: Alembic is the schema authority ---
@@ -434,6 +473,7 @@ def validate_and_initialize_schema(
         )
     _require_head(engine)
     _require_search_artifacts(engine)
+    _require_notification_artifacts(engine)
     return engine
 
 

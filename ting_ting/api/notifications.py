@@ -21,7 +21,12 @@ from ting_ting.database import get_db
 from ting_ting import notifications
 from ting_ting.models import User
 from ting_ting.schemas import (
+    AggregateReadResponse,
+    NotificationAggregateListResponse,
+    NotificationAggregateResponse,
     NotificationListResponse,
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdate,
     NotificationResponse,
     UnreadCountResponse,
     UserRef,
@@ -44,6 +49,76 @@ def _item(db: Session, row) -> NotificationResponse:
         created_at=row.created_at.isoformat() if row.created_at else None,
         is_read=row.read_at is not None,
     )
+
+
+@router.get("/preferences", response_model=NotificationPreferencesResponse)
+def get_notification_preferences(
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    return NotificationPreferencesResponse(**notifications.get_preferences(db, me.id))
+
+
+@router.patch("/preferences", response_model=NotificationPreferencesResponse)
+def patch_notification_preferences(
+    body: NotificationPreferencesUpdate,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    values = body.model_dump(exclude_none=True)
+    result = notifications.update_preferences(db, me.id, values)
+    db.commit()
+    return NotificationPreferencesResponse(**result)
+
+
+@router.get("/aggregates", response_model=NotificationAggregateListResponse)
+def list_notification_aggregates(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    groups = notifications.list_aggregates(db, me.id, limit=limit)
+    return NotificationAggregateListResponse(items=[
+        NotificationAggregateResponse(
+            id=group.latest.id,
+            actor=(
+                _user_ref(group.actors[0]) if group.actors
+                else UserRef(id=group.latest.actor_id, username="unknown")
+            ),
+            actors=[_user_ref(actor) for actor in group.actors],
+            actor_count=group.actor_count,
+            event_count=group.event_count,
+            kind=group.kind,
+            post_id=group.post_id,
+            created_at=(
+                group.latest.created_at.isoformat() if group.latest.created_at else None
+            ),
+            aggregation_key=group.aggregation_key,
+        )
+        for group in groups
+    ])
+
+
+@router.post(
+    "/aggregates/{aggregation_key}/read",
+    response_model=AggregateReadResponse,
+)
+def mark_notification_aggregate_read(
+    aggregation_key: str,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    try:
+        updated = notifications.mark_aggregate_read(db, me.id, aggregation_key)
+    except ValueError:
+        updated = 0
+    if updated == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "not_found", "message": "Notification aggregate not found."},
+        )
+    db.commit()
+    return AggregateReadResponse(updated=updated)
 
 
 @router.get("", response_model=NotificationListResponse)
