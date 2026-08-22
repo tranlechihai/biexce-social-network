@@ -23,7 +23,9 @@ from ting_ting import social
 from ting_ting.keyset import decode_cursor, encode_cursor
 from ting_ting.models import Activity, Mute
 
-NOTIFICATION_KINDS = ("follow", "follow_request", "like", "comment", "repost")
+NOTIFICATION_KINDS = (
+    "follow", "follow_request", "like", "comment", "repost", "mention",
+)
 
 
 # ---------------------------------------------------------------------------

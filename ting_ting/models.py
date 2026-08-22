@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     CheckConstraint,
+    DDL,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
+    event,
     text,
     UniqueConstraint,
 )
@@ -136,7 +138,7 @@ class Activity(Base):
     __tablename__ = "activities"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('follow','like','comment','repost','follow_request')",
+            "kind IN ('follow','like','comment','repost','follow_request','mention')",
             name="ck_activity_kind",
         ),
     )
@@ -336,6 +338,90 @@ class Post(Base):
     activities: Mapped[list["Activity"]] = relationship(
         cascade="all, delete-orphan", passive_deletes=True,
     )
+    mentions: Mapped[list["PostMention"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
+    hashtags: Mapped[list["PostHashtag"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
+
+
+class PostMention(Base):
+    """A resolved ``@username`` entity in a post (T-026).
+
+    Text that does not resolve to a current active account stays plain text;
+    duplicate mentions of the same account collapse to one row per post.
+    """
+
+    __tablename__ = "post_mentions"
+    __table_args__ = (
+        UniqueConstraint("post_id", "mentioned_user_id", name="uq_post_mention"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    post_id: Mapped[int] = mapped_column(
+        ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    mentioned_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class PostHashtag(Base):
+    """One normalized hashtag attached to a post (T-026)."""
+
+    __tablename__ = "post_hashtags"
+    __table_args__ = (
+        UniqueConstraint("post_id", "tag", name="uq_post_hashtag"),
+        Index("ix_post_hashtags_tag_post", "tag", "post_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    post_id: Mapped[int] = mapped_column(
+        ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+    )
+
+
+# ``Base.metadata.create_all`` is the fast path for isolated SQLite tests.
+# Alembic owns real databases, but create_all must still produce the same
+# migration-only FTS artifacts so tests cannot be stamped at head without a
+# working search index.  The FTS table is intentionally NOT mapped: backup /
+# copy tooling transfers canonical posts and rebuilds search indexes instead
+# of copying derived shadow rows.
+_SQLITE_POSTS_FTS_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5("
+    "content, content='posts', content_rowid='id', "
+    "tokenize='unicode61 remove_diacritics 0')"
+)
+_SQLITE_POSTS_FTS_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS posts_fts_ai AFTER INSERT ON posts BEGIN "
+    "INSERT INTO posts_fts(rowid, content) VALUES (new.id, new.content); END",
+    "CREATE TRIGGER IF NOT EXISTS posts_fts_ad AFTER DELETE ON posts BEGIN "
+    "INSERT INTO posts_fts(posts_fts, rowid, content) "
+    "VALUES ('delete', old.id, old.content); END",
+    "CREATE TRIGGER IF NOT EXISTS posts_fts_au AFTER UPDATE OF content ON posts BEGIN "
+    "INSERT INTO posts_fts(posts_fts, rowid, content) "
+    "VALUES ('delete', old.id, old.content); "
+    "INSERT INTO posts_fts(rowid, content) VALUES (new.id, new.content); END",
+)
+event.listen(
+    Post.__table__, "after_create",
+    DDL(_SQLITE_POSTS_FTS_DDL).execute_if(dialect="sqlite"),
+)
+for _fts_trigger in _SQLITE_POSTS_FTS_TRIGGERS:
+    event.listen(
+        Post.__table__, "after_create",
+        DDL(_fts_trigger).execute_if(dialect="sqlite"),
+    )
+event.listen(
+    Post.__table__, "before_drop",
+    DDL("DROP TABLE IF EXISTS posts_fts").execute_if(dialect="sqlite"),
+)
 
 
 class Like(Base):

@@ -243,6 +243,10 @@ class PostResponse(BaseModel):
     saved_by_viewer: bool = False
     reposted_by_viewer: bool = False
     media: list["PostMediaResponse"] = []
+    # Structured entities let mobile clients linkify without rendering raw
+    # server-authored HTML (T-026; original content remains escaped text).
+    mentions: list[str] = Field(default_factory=list)
+    hashtags: list[str] = Field(default_factory=list)
 
 
 class CommentResponse(BaseModel):

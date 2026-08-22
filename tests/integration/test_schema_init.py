@@ -331,3 +331,24 @@ class TestT019AlembicAuthority:
         validate_and_initialize_schema(engine)
         assert before == _snapshot()
         engine.dispose()
+
+    def test_legacy_unstamped_missing_fts_trigger_is_not_stamped(self, tmp_path: Path):
+        engine = _create_test_engine(str(tmp_path / "legacy_missing_fts.db"))
+        _init_test_engine(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TRIGGER posts_fts_au"))
+
+        with pytest.raises(ValueError, match="not Alembic-stamped"):
+            validate_and_initialize_schema(engine)
+        assert "alembic_version" not in set(inspect(engine).get_table_names())
+        engine.dispose()
+
+    def test_stamped_head_missing_fts_artifact_fails_closed(self, tmp_path: Path):
+        engine = _create_test_engine(str(tmp_path / "head_missing_fts.db"))
+        validate_and_initialize_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TRIGGER posts_fts_ai"))
+
+        with pytest.raises(ValueError, match="search artifacts are missing"):
+            validate_and_initialize_schema(engine)
+        engine.dispose()

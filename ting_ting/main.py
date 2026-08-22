@@ -19,7 +19,7 @@ from ting_ting.auth import WebAuthRedirect, WebBanned, decode_token
 from ting_ting import notifications as notification_service
 from ting_ting.errors import register_error_handlers
 from ting_ting.api import (
-    account, auth, extensions, interactions, moderation, notifications,
+    account, auth, discovery, extensions, interactions, moderation, notifications,
     posts, profile, social, users,
 )
 from ting_ting.media import router as media_router
@@ -152,6 +152,7 @@ API_ROUTERS = [
     extensions.profile_router, extensions.social_router,
     extensions.activity_router, extensions.feature_router,
     notifications.router, users.router, moderation.router,
+    discovery.router,
 ]
 for _api_router in API_ROUTERS:
     app.include_router(_api_router, prefix="/api")

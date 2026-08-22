@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Tìm bài viết · Biexce{% endblock %}
+{% block content %}
+<div class="people-page">
+  <div class="page-heading"><span class="eyebrow">Khám phá</span><h1>Tìm bài viết</h1></div>
+  <form class="form" method="get" action="/web/search" role="search">
+    <label for="post-search">Từ khóa</label>
+    <div class="form-inline"><input id="post-search" name="q" value="{{ query }}" maxlength="100" placeholder="Tìm nội dung bài viết"><button class="btn btn-primary">Tìm</button></div>
+  </form>
+  {% if tag %}<p class="eyebrow">#{{ tag }}</p>{% endif %}
+  <div class="profile-thread-list">
+  {% for post in posts %}
+    <article class="post profile-thread">
+      <div class="post-header"><a href="/web/profile/{{ post.author_username }}"><strong>{{ post.author_name }}</strong></a><span class="post-time">{{ post.created_at_str }}</span></div>
+      <div class="post-content">{{ post.content|linkify_post }}</div>
+    </article>
+  {% else %}
+    {% if query or tag %}<p class="empty-state">Không tìm thấy bài viết phù hợp.</p>{% endif %}
+  {% endfor %}
+  </div>
+</div>
+{% endblock %}

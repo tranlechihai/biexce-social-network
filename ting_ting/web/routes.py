@@ -43,6 +43,7 @@ from ting_ting.social import (
     relationship_state,
 )
 from ting_ting.posts import is_visible_to
+from ting_ting.post_entities import linkify_post_content
 from ting_ting.uploads import UploadRejected
 from ting_ting.schemas import (
     POST_CONTENT_MAX,
@@ -69,6 +70,7 @@ router = APIRouter(tags=["web"], dependencies=[Depends(require_csrf)])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Disable Jinja2 template cache to avoid Python 3.14 hashability issues
 _templates.env.cache = None
+_templates.env.filters["linkify_post"] = linkify_post_content
 
 
 def _render(name: str, request: Request, **ctx) -> HTMLResponse:
@@ -598,6 +600,36 @@ async def feed_page(
                     posts=posts, username=me.username, active="feed", feed_view=view,
                     suggestions=_people_context(db, me)["people"][:5],
                     errors=errors)
+
+
+@router.get("/search")
+async def post_search_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Server-rendered post/hashtag discovery surface (T-026)."""
+    from ting_ting import search as search_logic
+
+    query = (request.query_params.get("q") or "").strip()[:100]
+    tag = (request.query_params.get("tag") or "").strip()[:64]
+    if tag:
+        rows, _ = search_logic.query_hashtag_posts(db, me.id, tag, limit=50)
+    elif query:
+        rows, _ = search_logic.query_post_search(db, me.id, query, limit=50)
+    else:
+        rows = []
+    items = []
+    for post in rows:
+        item = _post_item(db, post, me.id)
+        item["created_at_str"] = (
+            post.created_at.strftime("%d/%m/%Y") if post.created_at else ""
+        )
+        items.append(item)
+    return _render(
+        "search.html", request, username=me.username, active="search",
+        posts=items, query=query, tag=tag,
+    )
 
 
 @router.get("/thread/new")
@@ -1255,7 +1287,7 @@ async def unfollow_submit(request: Request, db: Session = Depends(get_db), me: U
 @router.get("/activity")
 async def activity_page(request: Request, db: Session = Depends(get_db), me: User = Depends(get_current_user_web)):
     activity_kind = request.query_params.get("kind", "")
-    if activity_kind not in {"like", "comment", "follow", "follow_request"}:
+    if activity_kind not in {"like", "comment", "follow", "follow_request", "mention"}:
         activity_kind = ""
     rows, _ = notifications.list_notifications(
         db, me.id, limit=100, kind=activity_kind or None,

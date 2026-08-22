@@ -220,6 +220,9 @@ _LEGACY_REQUIRED_FK_ACTIONS = (
     ("saved_posts", "post_id", "posts", "CASCADE"),
     ("reposts", "post_id", "posts", "CASCADE"),
     ("activities", "post_id", "posts", "CASCADE"),
+    ("post_mentions", "post_id", "posts", "CASCADE"),
+    ("post_mentions", "mentioned_user_id", "users", "CASCADE"),
+    ("post_hashtags", "post_id", "posts", "CASCADE"),
     ("sessions", "user_id", "users", "CASCADE"),
     ("reports", "post_id", "posts", "SET NULL"),
     ("reports", "comment_id", "comments", "SET NULL"),
@@ -263,7 +266,11 @@ def _legacy_schema_matches_head(engine: Engine) -> bool:
             if _fk_delete_action(sql, col, reftable) != action:
                 return False
 
-        return all(any(c in sql for sql in create_sql.values()) for c in _LEGACY_REQUIRED_CHECK_CONSTRAINTS)
+        checks_ok = all(
+            any(c in sql for sql in create_sql.values())
+            for c in _LEGACY_REQUIRED_CHECK_CONSTRAINTS
+        )
+        return checks_ok and _search_artifacts_present(engine)
     except Exception:
         # Introspection failure is drift from our point of view — fail closed.
         return False
@@ -288,6 +295,39 @@ def _fk_delete_action(create_sql: str, col: str, reftable: str) -> str | None:
     if match is None:
         return None
     return match.group(1).upper() if match.group(1) else "NO ACTION"
+
+
+def _search_artifacts_present(engine: Engine) -> bool:
+    """Migration-only native search structures required at head (T-026)."""
+    try:
+        with engine.connect() as conn:
+            if engine.name == "sqlite":
+                rows = conn.execute(text(
+                    "SELECT type, name FROM sqlite_master "
+                    "WHERE name IN ('posts_fts','posts_fts_ai','posts_fts_ad','posts_fts_au')"
+                )).all()
+                return {(kind, name) for kind, name in rows} == {
+                    ("table", "posts_fts"),
+                    ("trigger", "posts_fts_ai"),
+                    ("trigger", "posts_fts_ad"),
+                    ("trigger", "posts_fts_au"),
+                }
+            if engine.name == "postgresql":
+                return bool(conn.execute(text(
+                    "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() "
+                    "AND tablename = 'posts' AND indexname = 'ix_posts_search_fts'"
+                )).scalar())
+    except Exception:
+        return False
+    return False
+
+
+def _require_search_artifacts(engine: Engine) -> None:
+    if not _search_artifacts_present(engine):
+        raise ValueError(
+            "Database is stamped at head but native post-search artifacts are missing. "
+            "Restore the T-026 FTS table/triggers or PostgreSQL GIN index before startup."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +394,7 @@ def validate_and_initialize_schema(
                 f"missing tables {sorted(missing_tables)!r}. Run 'alembic upgrade head'."
             )
         _require_head(engine)
+        _require_search_artifacts(engine)
         return engine
 
     # --- SQLite: Alembic is the schema authority ---
@@ -392,6 +433,7 @@ def validate_and_initialize_schema(
             "refusing to start on an invalid database."
         )
     _require_head(engine)
+    _require_search_artifacts(engine)
     return engine
 
 

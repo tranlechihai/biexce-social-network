@@ -116,6 +116,16 @@ def test_p011_parity_fixes_present(pg_engine):
             assert sequence, f"{table}.id has no backing sequence"
 
 
+def test_p014_native_search_index_present(pg_engine):
+    with pg_engine.connect() as conn:
+        definition = conn.execute(text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname='public' "
+            "AND indexname='ix_posts_search_fts'"
+        )).scalar_one()
+        assert "USING gin" in definition
+        assert "to_tsvector('simple'" in definition
+
+
 def test_startup_refuses_unmanaged_database(pg_engine):
     """Tables without an alembic_version stamp -> fail closed (no mutation)."""
     from ting_ting.database import _alembic_head_revision, validate_and_initialize_schema
@@ -161,7 +171,7 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
     )
     from ting_ting.migrate_data import copy_database
     from ting_ting.models import (
-        Comment, Like, Post, Report, User, UserProfile,
+        Comment, Like, Post, PostHashtag, PostMention, Report, User, UserProfile,
     )
 
     # --- source: SQLite, stamped at head, populated -----------------------
@@ -202,6 +212,8 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
         post = Post(author_id=alice.id, content="hello pg", audience="PUBLIC")
         s.add(post)
         s.flush()
+        s.add(PostMention(post_id=post.id, mentioned_user_id=bob.id))
+        s.add(PostHashtag(post_id=post.id, tag="pgcopy"))
         parent = Comment(post_id=post.id, author_id=bob.id, content="parent")
         s.add(parent)
         s.flush()
@@ -229,6 +241,8 @@ def test_copy_roundtrip_and_sequence_reanchor(pg_engine, tmp_path):
     assert copied["comments"] == 2
     assert copied["likes"] == 1
     assert copied["reports"] == 1
+    assert copied["post_mentions"] == 1
+    assert copied["post_hashtags"] == 1
     assert copied["deleted_accounts"] == 0
 
     # Values + primary keys preserved.
@@ -327,7 +341,7 @@ def test_api_smoke_on_postgres(pg_engine):
 
         created = client.post(
             "/api/v1/posts",
-            json={"content": "posted from postgres", "audience": "PUBLIC"},
+            json={"content": "posted from postgres #pgsearch", "audience": "PUBLIC"},
             follow_redirects=False,
         )
         assert created.status_code in {200, 201}, created.text
@@ -337,6 +351,17 @@ def test_api_smoke_on_postgres(pg_engine):
         feed = client.get("/api/v1/feed", follow_redirects=False)
         assert feed.status_code == 200, feed.text
         assert any(item.get("id") == post_id for item in feed.json())
+        searched = client.get(
+            "/api/v1/search/posts", params={"q": "postgres"},
+            follow_redirects=False,
+        )
+        assert searched.status_code == 200, searched.text
+        assert [item["id"] for item in searched.json()] == [post_id]
+        tagged = client.get(
+            "/api/v1/hashtags/pgsearch/posts", follow_redirects=False,
+        )
+        assert tagged.status_code == 200, tagged.text
+        assert [item["id"] for item in tagged.json()] == [post_id]
 
         # A follow must persist across requests (commit semantics hold on PG).
         stranger = client.post(

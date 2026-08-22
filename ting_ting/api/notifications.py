@@ -52,7 +52,7 @@ def list_notifications_api(
     cursor: str | None = Query(default=None),
     kind: str | None = Query(
         default=None,
-        pattern="^(follow|like|comment|repost)$",
+        pattern="^(follow|follow_request|like|comment|repost|mention)$",
     ),
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),

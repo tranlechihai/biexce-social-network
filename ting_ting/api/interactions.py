@@ -51,6 +51,8 @@ def _user_ref(user: User) -> UserRef:
 def _post_response(db: Session, post: Post, viewer_id: int | None = None) -> PostResponse:
     """Build a PostResponse with current interaction summary."""
     author = db.get(User, post.author_id)
+    from ting_ting.post_entities import post_entity_maps
+    mentions, hashtags = post_entity_maps(db, [post.id])
     return PostResponse(
         id=post.id,
         author=_user_ref(author) if author else UserRef(id=post.author_id, username="unknown"),
@@ -61,6 +63,8 @@ def _post_response(db: Session, post: Post, viewer_id: int | None = None) -> Pos
         like_count=interactions.count_likes(db, post.id),
         comment_count=interactions.count_comments(db, post.id),
         liked_by_viewer=bool(viewer_id and interactions.is_user_liked(db, viewer_id, post.id)),
+        mentions=mentions.get(post.id, []),
+        hashtags=hashtags.get(post.id, []),
     )
 
 

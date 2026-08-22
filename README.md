@@ -176,6 +176,15 @@ and refuses a non-empty target.
 - Media delivery is authorized via `/media/{filename}`; uploads are
   validated (magic bytes + blocked-content scan) and quota-limited per user
   and per fleet.
+- Discovery (T-026, authenticated): `GET /api/v1/search/posts?q=...` searches
+  visible post content using SQLite FTS5 or PostgreSQL native full-text search;
+  `GET /api/v1/hashtags/{tag}/posts` returns an exact normalized hashtag
+  timeline. Both use `limit` (1–100), an opaque `cursor`, newest-first order,
+  and return the next cursor in `X-Next-Cursor`. Results re-apply current
+  private-account, audience, block, mute, ban and deactivation rules.
+  `PostResponse` includes normalized `mentions` and `hashtags`; a newly added
+  visible `@username` creates a `mention` notification. Web discovery is at
+  `/web/search`, with escaped server-side mention/hashtag links.
 - Observability: `GET /health` (liveness), `GET /ready` (DB check, 503 when
   down), `GET /metrics` (Prometheus text). Every response carries
   `X-Request-ID`, matching the one-line access log (`rid=... path -> status`).

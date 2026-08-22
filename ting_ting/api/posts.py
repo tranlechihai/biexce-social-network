@@ -55,6 +55,8 @@ def _post_response(db: Session, post: Post, viewer_id: int | None = None) -> Pos
     """Build a PostResponse with current interaction summary."""
     author = db.get(User, post.author_id)
     liked, saved, reposted = posts.feed_viewer_states(db, viewer_id, [post.id])
+    from ting_ting.post_entities import post_entity_maps
+    mentions, hashtags = post_entity_maps(db, [post.id])
     return PostResponse(
         id=post.id,
         author=_user_ref(author) if author else UserRef(id=post.author_id, username="unknown"),
@@ -69,6 +71,8 @@ def _post_response(db: Session, post: Post, viewer_id: int | None = None) -> Pos
         saved_by_viewer=post.id in saved,
         reposted_by_viewer=post.id in reposted,
         media=_media_response(db, post.id),
+        mentions=mentions.get(post.id, []),
+        hashtags=hashtags.get(post.id, []),
     )
 
 
@@ -83,6 +87,8 @@ def _batch_post_responses(db: Session, feed_posts: list[Post],
     liked, saved, reposted = posts.feed_viewer_states(db, viewer_id, post_ids)
     media_by_post = posts.feed_media(db, post_ids)
     authors, _profiles = posts.feed_authors(db, [p.author_id for p in feed_posts])
+    from ting_ting.post_entities import post_entity_maps
+    mentions, hashtags = post_entity_maps(db, post_ids)
 
     results = []
     for post in feed_posts:
@@ -107,6 +113,8 @@ def _batch_post_responses(db: Session, feed_posts: list[Post],
                 )
                 for m in media_by_post.get(post.id, [])
             ],
+            mentions=mentions.get(post.id, []),
+            hashtags=hashtags.get(post.id, []),
         ))
     return results
 

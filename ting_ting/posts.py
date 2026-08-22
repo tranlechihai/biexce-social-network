@@ -26,6 +26,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ting_ting.keyset import decode_cursor, encode_cursor
+from ting_ting.post_entities import reconcile_post_entities
 from ting_ting.models import (
     Block, Comment, FriendRequest, Like, Mute, Post,
     PostMedia, Repost, SavedPost, User, UserProfile,
@@ -128,6 +129,12 @@ def create_post(db: Session, author_id: int, content: str, audience: str) -> Pos
     )
     db.add(post)
     db.flush()
+    new_mentions = reconcile_post_entities(db, post)
+    if new_mentions:
+        from ting_ting import notifications
+        for target_id in new_mentions:
+            if is_visible_to(post.author_id, target_id, post.audience, db):
+                notifications.record(db, target_id, post.author_id, "mention", post.id)
     return post
 
 
@@ -140,12 +147,22 @@ def edit_post(db: Session, post: Post, by_user_id: int,
     if post.author_id != by_user_id:
         raise ValueError("forbidden")
 
+    content_changed = content is not None and content != post.content
     if content is not None:
         post.content = content
     if audience is not None:
         post.audience = audience
     post.updated_at = datetime.now(timezone.utc)
     db.flush()
+    if content_changed:
+        new_mentions = reconcile_post_entities(db, post)
+        if new_mentions:
+            from ting_ting import notifications
+            for target_id in new_mentions:
+                if is_visible_to(post.author_id, target_id, post.audience, db):
+                    notifications.record(
+                        db, target_id, post.author_id, "mention", post.id,
+                    )
     return post
 
 

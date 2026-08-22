@@ -515,7 +515,7 @@ def test_0013_rebuild_roundtrip(tmp_path: Path):
     url = f"sqlite:///{db_path}"
     now_sql = _seed_graph_at_0012(url)
 
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0013")
 
     con = sqlite3.connect(db_path)
     try:
@@ -637,7 +637,7 @@ def test_0013_rebuild_roundtrip(tmp_path: Path):
         con.close()
 
     # Re-upgrade: backfill again, shapes back, rows intact.
-    _upgrade(url)
+    _run(url, "upgrade", "20260822_0013")
     con = sqlite3.connect(db_path)
     try:
         assert con.execute("SELECT COUNT(*) FROM follows").fetchone()[0] == 2
@@ -647,6 +647,132 @@ def test_0013_rebuild_roundtrip(tmp_path: Path):
         assert con.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0] == "20260822_0013"
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        con.close()
+
+# ---------------------------------------------------------------------------
+# 0014 — mentions / hashtags + native search
+# ---------------------------------------------------------------------------
+
+def test_0014_entities_fts_and_downgrade_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "discovery.db"
+    url = f"sqlite:///{db_path}"
+    _run(url, "upgrade", "20260822_0013")
+    now_sql = datetime.now(timezone.utc).replace(microsecond=0).isoformat(sep=" ")
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "INSERT INTO users (id, username, email, password_hash) VALUES "
+            "(1, 'author14', 'a14@x.com', 'h'), (2, 'target14', 't14@x.com', 'h')"
+        )
+        con.execute(
+            "INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+            f"VALUES (1, 1, 'Historical @target14 #LegacyTag', 'PUBLIC', "
+            f"'{now_sql}', '{now_sql}')"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0014"
+        )
+        assert con.execute(
+            "SELECT post_id, mentioned_user_id FROM post_mentions"
+        ).fetchall() == [(1, 2)]
+        assert con.execute("SELECT post_id, tag FROM post_hashtags").fetchall() == [
+            (1, "legacytag")
+        ]
+        # Historical backfill indexes entities but never sends notifications.
+        assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 0
+        artifacts = set(con.execute(
+            "SELECT type, name FROM sqlite_master WHERE name IN "
+            "('posts_fts','posts_fts_ai','posts_fts_ad','posts_fts_au')"
+        ).fetchall())
+        assert artifacts == {
+            ("table", "posts_fts"),
+            ("trigger", "posts_fts_ai"),
+            ("trigger", "posts_fts_ad"),
+            ("trigger", "posts_fts_au"),
+        }
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'Historical'"
+        ).fetchall() == [(1,)]
+
+        # Database triggers cover raw/bulk write paths too.
+        con.execute(
+            "INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+            f"VALUES (2, 1, 'triggerinsert', 'PUBLIC', '{now_sql}', '{now_sql}')"
+        )
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'triggerinsert'"
+        ).fetchall() == [(2,)]
+        con.execute("UPDATE posts SET content='triggerupdate' WHERE id=2")
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'triggerinsert'"
+        ).fetchall() == []
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'triggerupdate'"
+        ).fetchall() == [(2,)]
+        con.execute("DELETE FROM posts WHERE id=2")
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'triggerupdate'"
+        ).fetchall() == []
+        con.execute(
+            "INSERT INTO activities (id, user_id, actor_id, kind, post_id, created_at) "
+            f"VALUES (14, 2, 1, 'mention', 1, '{now_sql}')"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    # New notification kind cannot be represented by 0013: fail closed.
+    with pytest.raises(ValueError, match="mention notification rows exist"):
+        _run(url, "downgrade", "20260822_0013")
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0014"
+        )
+        assert con.execute("SELECT COUNT(*) FROM activities WHERE kind='mention'").fetchone()[0] == 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='posts_fts'"
+        ).fetchone()[0] == 1
+        con.execute("DELETE FROM activities WHERE kind='mention'")
+        con.commit()
+    finally:
+        con.close()
+
+    _run(url, "downgrade", "20260822_0013")
+    con = sqlite3.connect(db_path)
+    try:
+        names = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE name IN "
+            "('posts_fts','post_mentions','post_hashtags')"
+        )}
+        assert names == set()
+        ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='activities'"
+        ).fetchone()[0]
+        assert "'mention'" not in ddl
+        assert con.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 1
+    finally:
+        con.close()
+
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
+            "20260822_0014"
+        )
+        assert con.execute("SELECT tag FROM post_hashtags").fetchall() == [("legacytag",)]
+        assert con.execute(
+            "SELECT rowid FROM posts_fts WHERE posts_fts MATCH 'Historical'"
+        ).fetchall() == [(1,)]
         assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         con.close()

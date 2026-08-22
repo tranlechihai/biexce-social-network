@@ -34,7 +34,7 @@
         <time>{{ post.created_at_str }}</time>
         {% if post.is_own %}<button class="thread-menu" data-toggle-post-edit data-post-id="{{ post.id }}" aria-label="Chỉnh sửa bài viết"><svg><use href="#i-more"/></svg></button>{% endif %}
       </header>
-      <div class="thread-content">{{ post.content }}</div>
+      <div class="thread-content">{{ post.content|linkify_post }}</div>
       {% if post.media %}<div class="post-media">{% for media in post.media %}{% set media_path = media.path if media is mapping else media %}{% set media_type = media.type if media is mapping else 'image' %}{% if media_type == 'video' %}<video src="{{ media_path }}" controls preload="metadata"></video>{% else %}<img src="{{ media_path }}" alt="Ảnh bài viết" loading="lazy">{% endif %}{% endfor %}</div>{% endif %}
 
       {% if post.is_own %}<div id="edit-form-{{ post.id }}" class="hidden thread-edit"><form class="form" action="/web/posts/{{ post.id }}/edit" method="post"><textarea name="content" required maxlength="2000" rows="3">{{ post.content }}</textarea><select name="audience"><option value="ONLY_ME" {% if post.audience == 'ONLY_ME' %}selected{% endif %}>Chỉ mình tôi</option><option value="FRIENDS" {% if post.audience == 'FRIENDS' %}selected{% endif %}>Bạn bè</option><option value="PUBLIC" {% if post.audience == 'PUBLIC' %}selected{% endif %}>Mọi người</option></select><div class="button-row"><button class="btn btn-primary">Lưu</button><button class="btn btn-danger" formaction="/web/posts/{{ post.id }}/delete" onclick="return confirm('Xóa bài viết này và toàn bộ phản hồi? Hành động không thể hoàn tác.');">Xóa</button></div></form></div>{% endif %}
