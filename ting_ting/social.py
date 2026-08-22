@@ -38,6 +38,251 @@ def is_blocked(db: Session, user_a_id: int, user_b_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Follow edges (T-024: pending approval for private accounts)
+# ---------------------------------------------------------------------------
+
+def is_active_follower(db: Session, follower_id: int, followed_id: int) -> bool:
+    """True if ``follower_id`` has a LIVE (approved) follow on ``followed_id``.
+
+    Pending follow requests grant NO visibility — the private gate in
+    ``posts.is_visible_to`` and every feed query uses this helper.
+    """
+    return db.scalar(
+        select(Follow.id).where(
+            Follow.follower_id == follower_id,
+            Follow.followed_id == followed_id,
+            Follow.status == "active",
+        )
+    ) is not None
+
+
+def active_followed_ids(viewer_id: int):
+    """Subquery: users the viewer actively follows (pending rows excluded)."""
+    return select(Follow.followed_id).where(
+        Follow.follower_id == viewer_id,
+        Follow.status == "active",
+    )
+
+
+def request_follow(
+    db: Session,
+    follower: User,
+    target: User,
+) -> Follow:
+    """Create a follow edge toward ``target``.
+
+    * public target → ``active`` immediately, ``follow`` notification;
+    * private target → ``pending`` (a follow REQUEST), ``follow_request``
+      notification for the target.
+
+    Idempotent per pair: an existing edge (either state) is returned as-is —
+    a second PUT from the follower is a no-op, never a duplicate row.
+    Raises ``ValueError``: ``self_follow``, ``blocked``.
+    """
+    if follower.id == target.id:
+        raise ValueError("self_follow")
+    if is_blocked(db, follower.id, target.id):
+        raise ValueError("blocked")
+
+    existing = db.execute(
+        select(Follow).where(
+            Follow.follower_id == follower.id,
+            Follow.followed_id == target.id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    from ting_ting import notifications
+
+    status = "pending" if target.is_private else "active"
+    kind = "follow_request" if status == "pending" else "follow"
+    follow = None
+    try:
+        with db.begin_nested():
+            follow = Follow(
+                follower_id=follower.id, followed_id=target.id, status=status,
+            )
+            db.add(follow)
+            notifications.record(db, target.id, follower.id, kind)
+            db.flush()
+    except IntegrityError:
+        # Concurrent same-pair follow won the uq_follow_pair race (or the
+        # target switched public→private between our read and insert).  The
+        # savepoint rolled our rows back — converge to whatever exists now.
+        from sqlalchemy.orm.attributes import instance_state
+        if follow is not None and instance_state(follow).session_id is not None:
+            db.expunge(follow)
+        existing = db.execute(
+            select(Follow).where(
+                Follow.follower_id == follower.id,
+                Follow.followed_id == target.id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        # Target flipped to private mid-flight: retry once as pending.
+        if status == "active":
+            return request_follow(db, follower, db.get(User, target.id) or target)
+        raise
+    return follow
+
+
+def approve_follow_request(
+    db: Session,
+    follow: Follow,
+    by_user: User,
+) -> Follow:
+    """Approve a pending follow request — must be the *followed* user.
+
+    Rechecks the block graph at transition time (a partner may have blocked
+    in the meantime) and notifies the requester with ``follow``.
+    Raises ``ValueError``: ``not_owner``, ``not_pending``, ``blocked``.
+    """
+    if follow.followed_id != by_user.id:
+        raise ValueError("not_owner")
+    if follow.status != "pending":
+        raise ValueError("not_pending")
+    if is_blocked(db, follow.follower_id, follow.followed_id):
+        raise ValueError("blocked")
+
+    from ting_ting import notifications
+
+    follow.status = "active"
+    db.flush()
+    notifications.record(db, follow.follower_id, by_user.id, "follow")
+    db.flush()
+    return follow
+
+
+def reject_follow_request(
+    db: Session,
+    follow: Follow,
+    by_user: User,
+) -> Follow:
+    """Reject a pending follow request — must be the *followed* user.
+
+    The edge did not apply, so the row is DELETED (it leaves the requester's
+    outgoing list and the owner's inbox in one move).
+    Raises ``ValueError``: ``not_owner``, ``not_pending``.
+    """
+    if follow.followed_id != by_user.id:
+        raise ValueError("not_owner")
+    if follow.status != "pending":
+        raise ValueError("not_pending")
+    db.delete(follow)
+    db.flush()
+    return follow
+
+
+def cancel_follow_request(
+    db: Session,
+    follower: User,
+    target_id: int,
+) -> bool:
+    """Delete ``follower``'s pending request toward ``target_id``.
+
+    Only the requester may cancel; only ``pending`` edges are cancelable
+    (active follows go through unfollow).  Returns True if a row was deleted.
+    """
+    row = db.execute(
+        select(Follow).where(
+            Follow.follower_id == follower.id,
+            Follow.followed_id == target_id,
+            Follow.status == "pending",
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    db.delete(row)
+    db.flush()
+    return True
+
+
+def unsettle_follows_on_block(
+    db: Session,
+    user_a_id: int,
+    user_b_id: int,
+) -> None:
+    """Delete BOTH follow edges (either state) of a pair being blocked.
+
+    ``block_user`` calls this — a block must sever pending requests too, not
+    just active follows.
+    """
+    for row in db.execute(
+        select(Follow).where(
+            ((Follow.follower_id == user_a_id) & (Follow.followed_id == user_b_id))
+            | ((Follow.follower_id == user_b_id) & (Follow.followed_id == user_a_id))
+        )
+    ).scalars().all():
+        db.delete(row)
+
+
+def apply_privacy_change(
+    db: Session,
+    user: User,
+    is_private: bool | None,
+) -> User:
+    """Apply an ``is_private`` toggle (owner-side) with its side effects.
+
+    * public → private: existing active followers keep follow status (they
+      already opted in); NEW follows become pending requests.
+    * private → public: every pending inbound request is auto-approved
+      (``active``) and each requester is notified with ``follow`` — going
+      public means accepting everyone who asked.
+
+    ``None`` leaves the flag untouched.  Returns the user for chaining.
+    """
+    if is_private is None:
+        return user
+    if is_private:
+        user.is_private = True
+        db.flush()
+        return user
+
+    # Becoming PUBLIC — auto-approve pending inbound follow requests.
+    user.is_private = False
+    db.flush()
+    from ting_ting import notifications
+
+    pending = db.execute(
+        select(Follow).where(
+            Follow.followed_id == user.id,
+            Follow.status == "pending",
+        )
+    ).scalars().all()
+    for follow in pending:
+        follow.status = "active"
+        notifications.record(db, follow.follower_id, user.id, "follow")
+    db.flush()
+    return user
+
+
+def list_follow_requests(
+    db: Session,
+    user_id: int,
+    direction: str,
+) -> list[Follow]:
+    """Pending follow edges for ``user_id``.
+
+    ``direction``: ``"inbox"`` (people awaiting MY approval) or
+    ``"outgoing"`` (MY requests awaiting someone else).  Newest first.
+    Raises ``ValueError`` on an unknown direction.
+    """
+    if direction == "inbox":
+        cond = and_(Follow.followed_id == user_id, Follow.status == "pending")
+    elif direction == "outgoing":
+        cond = and_(Follow.follower_id == user_id, Follow.status == "pending")
+    else:
+        raise ValueError("invalid_direction")
+    return list(
+        db.scalars(
+            select(Follow).where(cond).order_by(Follow.created_at.desc(), Follow.id.desc())
+        ).all()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Relationship state
 # ---------------------------------------------------------------------------
 
@@ -306,13 +551,8 @@ def block_user(
     ).scalars().all():
         db.delete(req)
 
-    for follow in db.execute(
-        select(Follow).where(
-            ((Follow.follower_id == blocker.id) & (Follow.followed_id == blocked.id))
-            | ((Follow.follower_id == blocked.id) & (Follow.followed_id == blocker.id))
-        )
-    ).scalars().all():
-        db.delete(follow)
+    # Sever BOTH follow edges, pending requests included (T-024).
+    unsettle_follows_on_block(db, blocker.id, blocked.id)
 
     # Create block (idempotent via unique constraint)
     existing = db.execute(
@@ -549,12 +789,20 @@ def search_users(
 # ---------------------------------------------------------------------------
 
 def user_counts(db: Session, user_id: int) -> dict[str, int]:
-    """Return follower/following/friend counts for ``user_id``."""
+    """Return follower/following/friend counts for ``user_id``.
+
+    Follow counts reflect LIVE edges only (T-024): pending requests are not
+    followers/follows of any kind.
+    """
     followers = db.scalar(
-        select(func.count(Follow.id)).where(Follow.followed_id == user_id)
+        select(func.count(Follow.id)).where(
+            Follow.followed_id == user_id, Follow.status == "active",
+        )
     ) or 0
     following = db.scalar(
-        select(func.count(Follow.id)).where(Follow.follower_id == user_id)
+        select(func.count(Follow.id)).where(
+            Follow.follower_id == user_id, Follow.status == "active",
+        )
     ) or 0
     friends = db.scalar(
         select(func.count(FriendRequest.id)).where(

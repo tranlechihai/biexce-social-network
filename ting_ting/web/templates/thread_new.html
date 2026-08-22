@@ -11,7 +11,7 @@
   <form class="create-panel" action="/web/posts/create" method="post" enctype="multipart/form-data">
     <div class="create-author">
       <span class="avatar avatar-md">{% if user.avatar %}<img src="{{ user.avatar }}" alt="">{% else %}{{ (user.display_name or user.username)[0]|upper }}{% endif %}</span>
-      <span><strong>{{ user.display_name or user.username }}</strong><label class="audience-control"><svg><use href="#i-users"/></svg><span class="sr-only">Đối tượng</span><select name="audience" aria-label="Đối tượng"><option value="ONLY_ME">Chỉ mình tôi</option><option value="FRIENDS">Bạn bè</option><option value="PUBLIC">Mọi người</option></select><svg><use href="#i-chevron-down"/></svg></label></span>
+      <span><strong>{{ user.display_name or user.username }}</strong><label class="audience-control"><svg><use href="#i-users"/></svg><span class="sr-only">Đối tượng</span><select name="audience" aria-label="Đối tượng"><option value="ONLY_ME">Chỉ mình tôi</option><option value="FRIENDS">Bạn bè</option><option value="PUBLIC">Mọi người</option><option value="FOLLOWERS">Người theo dõi</option></select><svg><use href="#i-chevron-down"/></svg></label></span>
     </div>
     <label for="thread-content" class="sr-only">Nội dung bài viết</label>
     <textarea id="thread-content" name="content" required maxlength="2000" rows="7" placeholder="Chia sẻ điều gì đó với mọi người..."></textarea>

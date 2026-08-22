@@ -17,7 +17,8 @@ from ting_ting.models import (
 from ting_ting.posts import is_visible_to, list_saved_posts as list_saved_posts_service
 from ting_ting.schemas import (
     ActivityResponse, ExtendedProfileResponse, ExtendedProfileUpdateRequest,
-    PostMediaResponse, PostResponse, ToggleResponse, UserRef,
+    PostMediaResponse, PostResponse, ToggleResponse,
+    UserRef,
 )
 
 
@@ -38,6 +39,7 @@ def _profile_response(user: User, profile: UserProfile | None) -> ExtendedProfil
         email=user.email,
         display_name=user.display_name,
         bio=user.bio,
+        is_private=user.is_private,
         birthday=profile.birthday if profile else None,
         gender=profile.gender if profile else None,
         location=profile.location if profile else None,
@@ -81,8 +83,13 @@ def update_profile_details(
     for field in ("display_name", "bio"):
         if field in values:
             setattr(me, field, values.pop(field))
+    is_private = values.pop("is_private", None)
     for field, value in values.items():
         setattr(profile, field, value)
+    if is_private is not None:
+        # T-024: going public auto-approves pending follow requests
+        # (side effect lives in the domain layer).
+        social.apply_privacy_change(db, me, is_private)
     db.commit()
     return _profile_response(me, profile)
 
@@ -93,41 +100,27 @@ def follow_user(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
+    """Follow a user.
+
+    T-024: following a PRIVATE user creates a PENDING follow request
+    (``state="pending"`` in the response) that the user must approve;
+    following a public user is ``state="active"`` immediately.  Repeating
+    the call is a no-op that converges to the current edge state.
+    """
     target = _find_user(db, target_user_id)
     if target.id == me.id:
         raise HTTPException(status_code=409, detail={"code": "conflict", "message": "Cannot follow yourself."})
-    if social.is_blocked(db, me.id, target.id):
-        raise HTTPException(status_code=409, detail={"code": "conflict", "message": "A block prevents this action."})
-    existing = db.scalar(select(Follow).where(
-        Follow.follower_id == me.id, Follow.followed_id == target.id,
-    ))
-    if existing is None:
-        follow = None
-        try:
-            with db.begin_nested():
-                follow = Follow(follower_id=me.id, followed_id=target.id)
-                db.add(follow)
-                notifications.record(db, target.id, me.id, "follow")
-                db.flush()
-        except IntegrityError:
-            # A concurrent request inserted the same follow first — the
-            # savepoint already rolled back our rows, so converge instead of
-            # failing.
-            from sqlalchemy.orm.attributes import instance_state
-            if follow is not None and instance_state(follow).session_id is not None:
-                db.expunge(follow)
-            existing = db.scalar(select(Follow).where(
-                Follow.follower_id == me.id, Follow.followed_id == target.id,
-            ))
-            if existing is None:
-                raise
-        else:
-            # Commit the outer transaction explicitly.  Close-time handling of
-            # the autobegun transaction is dialect-dependent (SQLite happens to
-            # keep the rows; PostgreSQL rolls them back), so the web route's
-            # ``else: db.commit()`` pattern is the safe one to mirror here.
-            db.commit()
-    return ToggleResponse(active=True)
+    try:
+        follow = social.request_follow(db, me, target)
+    except ValueError as exc:
+        reason = exc.args[0]
+        if reason == "self_follow":
+            raise HTTPException(status_code=409, detail={"code": "conflict", "message": "Cannot follow yourself."}) from None
+        if reason == "blocked":
+            raise HTTPException(status_code=409, detail={"code": "conflict", "message": "A block prevents this action."}) from None
+        raise
+    db.commit()
+    return ToggleResponse(active=follow.status == "active", state=follow.status)
 
 
 @social_router.delete("/follows/{target_user_id}", response_model=ToggleResponse)
@@ -136,6 +129,8 @@ def unfollow_user(
     db: Session = Depends(get_db),
     me: User = Depends(get_current_user),
 ):
+    """Unfollow a user — or cancel a still-pending follow request (T-024).
+    Idempotent."""
     _find_user(db, target_user_id)
     existing = db.scalar(select(Follow).where(
         Follow.follower_id == me.id, Follow.followed_id == target_user_id,
@@ -199,9 +194,13 @@ def unmute_user_endpoint(
 
 @social_router.get("/following", response_model=list[UserRef])
 def list_following(db: Session = Depends(get_db), me: User = Depends(get_current_user)):
+    """Users I ACTIVELY follow (pending outgoing requests are not follows —
+    see ``GET /social/follow-requests?direction=outgoing``)."""
     return _follow_users(
         db,
-        select(Follow).where(Follow.follower_id == me.id).order_by(Follow.created_at.desc(), Follow.id.desc()),
+        select(Follow).where(
+            Follow.follower_id == me.id, Follow.status == "active",
+        ).order_by(Follow.created_at.desc(), Follow.id.desc()),
         me,
         "followed_id",
     )
@@ -209,9 +208,13 @@ def list_following(db: Session = Depends(get_db), me: User = Depends(get_current
 
 @social_router.get("/followers", response_model=list[UserRef])
 def list_followers(db: Session = Depends(get_db), me: User = Depends(get_current_user)):
+    """My ACTIVE followers (pending inbound requests are not followers —
+    see ``GET /social/follow-requests?direction=inbox``)."""
     return _follow_users(
         db,
-        select(Follow).where(Follow.followed_id == me.id).order_by(Follow.created_at.desc(), Follow.id.desc()),
+        select(Follow).where(
+            Follow.followed_id == me.id, Follow.status == "active",
+        ).order_by(Follow.created_at.desc(), Follow.id.desc()),
         me,
         "follower_id",
     )

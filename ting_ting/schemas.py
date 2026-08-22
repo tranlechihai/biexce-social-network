@@ -77,6 +77,8 @@ class UserResponse(BaseModel):
     email: str
     display_name: str | None = None
     bio: str | None = None
+    # T-024: private accounts gate content on follower approval.
+    is_private: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -92,6 +94,8 @@ class ProfileUpdateRequest(BaseModel):
         max_length=DISPLAY_NAME_MAX,
     )
     bio: str | None = Field(default=None, max_length=BIO_MAX)
+    # T-024: toggling to public auto-approves pending follow requests.
+    is_private: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -185,14 +189,14 @@ class PostCreateRequest(BaseModel):
     """Create a new post."""
 
     content: str = Field(min_length=1, max_length=POST_CONTENT_MAX)
-    audience: str = Field(default="ONLY_ME")  # "ONLY_ME" | "FRIENDS" | "PUBLIC"
+    audience: str = Field(default="ONLY_ME")  # ONLY_ME | FRIENDS | PUBLIC | FOLLOWERS
 
     @field_validator("audience")
     @classmethod
     def _audience_allowed(cls, v: str) -> str:
         v = v.strip()
-        if v not in ("ONLY_ME", "FRIENDS", "PUBLIC"):
-            raise ValueError("Invalid audience. Allowed: ONLY_ME, FRIENDS, PUBLIC.")
+        if v not in ("ONLY_ME", "FRIENDS", "PUBLIC", "FOLLOWERS"):
+            raise ValueError("Invalid audience. Allowed: ONLY_ME, FRIENDS, PUBLIC, FOLLOWERS.")
         return v
 
 
@@ -208,8 +212,8 @@ class PostUpdateRequest(BaseModel):
         if v is None:
             return None
         v = v.strip()
-        if v not in ("ONLY_ME", "FRIENDS", "PUBLIC"):
-            raise ValueError("Invalid audience. Allowed: ONLY_ME, FRIENDS, PUBLIC.")
+        if v not in ("ONLY_ME", "FRIENDS", "PUBLIC", "FOLLOWERS"):
+            raise ValueError("Invalid audience. Allowed: ONLY_ME, FRIENDS, PUBLIC, FOLLOWERS.")
         return v
 
 
@@ -326,6 +330,8 @@ class UserPublicResponse(BaseModel):
     bio: str | None = None
     avatar_url: str | None = None
     relationship: str
+    # T-024: lets clients know a follow will be pending until approved.
+    is_private: bool = False
     follower_count: int | None = None
     following_count: int | None = None
     friend_count: int | None = None
@@ -356,6 +362,7 @@ class ExtendedProfileUpdateRequest(BaseModel):
 
     display_name: str | None = Field(default=None, max_length=DISPLAY_NAME_MAX)
     bio: str | None = Field(default=None, max_length=BIO_MAX)
+    is_private: bool | None = None
     birthday: str | None = None
     gender: Literal["female", "male", "non_binary", "prefer_not_to_say"] | None = None
     location: str | None = Field(default=None, max_length=100)
@@ -389,6 +396,7 @@ class ExtendedProfileResponse(BaseModel):
     email: str
     display_name: str | None = None
     bio: str | None = None
+    is_private: bool = False
     birthday: str | None = None
     gender: str | None = None
     location: str | None = None
@@ -427,6 +435,22 @@ class UnreadCountResponse(BaseModel):
 
 class ToggleResponse(BaseModel):
     active: bool
+    # T-024: follow endpoints report the edge state — "pending" while a
+    # private account must approve the request.  None for non-follow uses.
+    state: str | None = None
+
+
+class FollowRequestResponse(BaseModel):
+    """Public representation of a follow request (a pending follow edge).
+
+    ``requester`` follows ``owner`` and awaits the owner's decision.
+    """
+
+    id: int
+    requester: UserRef
+    owner: UserRef
+    status: str  # always "pending" while listable
+    created_at: str | None = None
 
 
 class PostMediaResponse(BaseModel):

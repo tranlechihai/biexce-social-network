@@ -42,6 +42,13 @@ class User(Base):
     is_moderator: Mapped[bool] = mapped_column(nullable=False, default=False)
     banned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
+    # T-024: private account.  When set, the user's PUBLIC posts are visible
+    # only to friends and ACTIVE followers, and following becomes a
+    # pending request that the user must approve (see ``Follow.status``).
+    is_private: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false"),
+    )
+
     # Account lifecycle (T-023): self-deactivation. Reversible — the user can
     # sign back in (login is NOT blocked, unlike a ban) and reactivate. While
     # set, the user is hidden from feeds, search, public profiles and graphs.
@@ -92,14 +99,27 @@ class UserProfile(Base):
 
 
 class Follow(Base):
+    """Directed follow edge: ``follower_id`` follows ``followed_id``.
+
+    T-024: ``status`` — ``pending`` is a follow REQUEST to a private account
+    (the target must approve), ``active`` is a live follow.  Approving a
+    request flips pending → active; rejecting, unfollowing or cancelling all
+    DELETE the row — a follow edge that does not apply simply does not
+    exist, which keeps the unique pair and every count trivially correct.
+    All readers (feeds, lists, counts) must filter on ``status == 'active'``
+    except the follow-request management endpoints.
+    """
+
     __tablename__ = "follows"
     __table_args__ = (
         UniqueConstraint("follower_id", "followed_id", name="uq_follow_pair"),
         CheckConstraint("follower_id <> followed_id", name="ck_follow_not_self"),
+        CheckConstraint("status IN ('pending', 'active')", name="ck_follow_status"),
     )
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     follower_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     followed_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -108,12 +128,15 @@ class Activity(Base):
 
     ``read_at`` is NULL while the notification is unread.  Deleting the
     referenced post cascades to its notification rows (no leaked pointers).
+    ``kind`` ``'follow_request'`` (T-024) marks a pending follow on a
+    private account — it becomes a plain ``'follow'`` notification for the
+    requester once the target approves or the account goes public.
     """
 
     __tablename__ = "activities"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('follow','like','comment','repost')",
+            "kind IN ('follow','like','comment','repost','follow_request')",
             name="ck_activity_kind",
         ),
     )
@@ -251,15 +274,18 @@ class Block(Base):
 class Post(Base):
     """Text post with audience control.
 
-    Audiences: ``ONLY_ME`` (author only) or ``FRIENDS`` (author + current friends).
+    Audiences: ``ONLY_ME`` (author only), ``FRIENDS`` (author + current friends),
+    ``PUBLIC`` (anyone, subject to the author's privacy setting) and
+    ``FOLLOWERS`` (author + active followers — T-024).
     Visibility is re-evaluated at every read (including feed) against the
-    current block/friendship graph — a stored post ID alone grants no access.
+    current block/friend/follow graph and the author's privacy flag — a
+    stored post ID alone grants no access.
     """
 
     __tablename__ = "posts"
     __table_args__ = (
         CheckConstraint(
-            "audience IN ('ONLY_ME', 'FRIENDS', 'PUBLIC')",
+            "audience IN ('ONLY_ME', 'FRIENDS', 'PUBLIC', 'FOLLOWERS')",
             name="ck_post_audience",
         ),
         # Feed ordering is (created_at DESC, id DESC) — one index serves the

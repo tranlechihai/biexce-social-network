@@ -78,7 +78,10 @@ def search_users(
     db.commit()
     followed_ids = set(
         db.scalars(
-            select(Follow.followed_id).where(Follow.follower_id == me.id)
+            select(Follow.followed_id).where(
+                Follow.follower_id == me.id,
+                Follow.status == "active",  # T-024: pending is not following
+            )
         ).all()
     )
     items = []
@@ -135,6 +138,7 @@ def get_public_user(
         bio=target.bio,
         avatar_url=_avatar_url(profile),
         relationship=rel,
+        is_private=target.is_private,
         follower_count=counts["followers"],
         following_count=counts["following"],
         friend_count=counts["friends"],
@@ -163,10 +167,12 @@ def _followers_or_404(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "not_found", "message": "User not found."},
         )
+    # T-024: pending requests are not edges of the graph — active only.
     query = select(Follow).where(
+        Follow.status == "active",
         Follow.followed_id == target.id
         if direction == "followers"
-        else Follow.follower_id == target.id
+        else Follow.follower_id == target.id,
     )
     if cursor:
         try:

@@ -95,6 +95,7 @@ def _user_summary(db: Session, user: User) -> dict:
         "email": user.email,
         "display_name": user.display_name,
         "bio": user.bio,
+        "is_private": user.is_private,
         "birthday": profile.birthday if profile else None,
         "gender": profile.gender if profile else None,
         "location": profile.location if profile else None,
@@ -150,6 +151,7 @@ def _people_context(db: Session, me: User) -> dict:
         if state != "blocked_by_them":
             followed = db.execute(sa_select(Follow).where(
                 Follow.follower_id == me.id, Follow.followed_id == user.id,
+                Follow.status == "active",  # T-024: pending is not following
             )).scalar_one_or_none() is not None
             people.append({
                 **_user_summary(db, user),
@@ -627,7 +629,7 @@ async def create_post_submit(
         return RedirectResponse(url="/web/feed?error=empty", status_code=303)
     if len(content) > POST_CONTENT_MAX:
         return RedirectResponse(url="/web/feed?error=too_long", status_code=303)
-    if audience not in ("ONLY_ME", "FRIENDS", "PUBLIC"):
+    if audience not in ("ONLY_ME", "FRIENDS", "PUBLIC", "FOLLOWERS"):
         return RedirectResponse(
             url="/web/feed?error=invalid_audience", status_code=303,
         )
@@ -687,7 +689,7 @@ async def edit_post_submit(
     if len(content) > POST_CONTENT_MAX:
         return RedirectResponse(url="/web/feed?error=too_long", status_code=303)
     if audience is not None:
-        if audience not in ("ONLY_ME", "FRIENDS", "PUBLIC"):
+        if audience not in ("ONLY_ME", "FRIENDS", "PUBLIC", "FOLLOWERS"):
             return RedirectResponse(
                 url="/web/feed?error=invalid_audience", status_code=303,
             )
@@ -733,14 +735,19 @@ async def delete_post_submit(
 # ---------------------------------------------------------------------------
 
 def _follow_counts(db: Session, user_id: int) -> tuple[int, int]:
-    """(following, followers) counts for a user."""
+    """(following, followers) counts for a user — LIVE edges only (T-024:
+    pending follow requests are not follows of any kind)."""
     from sqlalchemy import func
 
     following = db.execute(
-        sa_select(func.count()).select_from(Follow).where(Follow.follower_id == user_id)
+        sa_select(func.count()).select_from(Follow).where(
+            Follow.follower_id == user_id, Follow.status == "active",
+        )
     ).scalar_one()
     followers = db.execute(
-        sa_select(func.count()).select_from(Follow).where(Follow.followed_id == user_id)
+        sa_select(func.count()).select_from(Follow).where(
+            Follow.followed_id == user_id, Follow.status == "active",
+        )
     ).scalar_one()
     return int(following), int(followers)
 
@@ -818,9 +825,11 @@ async def user_profile_page(
         raise HTTPException(status_code=404, detail="User not found.")
 
     rel = relationship_state(db, me.id, target.id)
-    following = db.execute(
+    follow_edge = db.execute(
         sa_select(Follow).where(Follow.follower_id == me.id, Follow.followed_id == target.id)
-    ).scalar_one_or_none() is not None
+    ).scalar_one_or_none()
+    following = follow_edge is not None and follow_edge.status == "active"
+    follow_request_pending = follow_edge is not None and follow_edge.status == "pending"
     muted = is_muted_by(db, me.id, target.id)
     outgoing_request_id = None
     if rel == "pending_outgoing":
@@ -855,6 +864,7 @@ async def user_profile_page(
     return _render("profile.html", request,
                     user=summary, username=me.username,
                     is_own=target.id == me.id, relationship=rel, following=following,
+                    follow_request_pending=follow_request_pending,
                     muted=muted, outgoing_request_id=outgoing_request_id,
                     active="profile", posts=posts,
                     following_count=following_count, followers_count=followers_count)
@@ -949,6 +959,10 @@ async def update_profile_submit(
 
     me.display_name = display_name
     me.bio = bio
+    # T-024: privacy toggle — the checkbox is present in the form only when
+    # checked; unchecking goes public, which auto-approves pending follow
+    # requests (side effects in social.apply_privacy_change).
+    social_logic.apply_privacy_change(db, me, "is_private" in form)
     try:
         db.commit()
     except Exception:
@@ -1221,18 +1235,15 @@ async def follow_submit(request: Request, db: Session = Depends(get_db), me: Use
     form = await request.form()
     next_url = _safe_next(request, form.get("next", ""))
     target = db.execute(sa_select(User).where(User.username == form.get("target_username", ""))).scalar_one_or_none()
+    # T-024: the domain layer decides active vs pending (private targets get
+    # a follow REQUEST) and records the right notification.  Idempotent.
     if target and target.id != me.id and not social_logic.is_blocked(db, me.id, target.id):
-        existing = db.execute(sa_select(Follow).where(Follow.follower_id == me.id, Follow.followed_id == target.id)).scalar_one_or_none()
-        if not existing:
-            try:
-                with db.begin_nested():
-                    db.add(Follow(follower_id=me.id, followed_id=target.id))
-                    notifications.record(db, target.id, me.id, "follow")
-                    db.flush()
-            except IntegrityError:
-                pass
-            else:
-                db.commit()
+        try:
+            social_logic.request_follow(db, me, target)
+            db.commit()
+        except IntegrityError:
+            # Concurrent same-pair follow — the edge exists; converge silently.
+            db.rollback()
     return RedirectResponse(url=next_url, status_code=303)
 
 
@@ -1268,7 +1279,7 @@ async def unfollow_submit(request: Request, db: Session = Depends(get_db), me: U
 @router.get("/activity")
 async def activity_page(request: Request, db: Session = Depends(get_db), me: User = Depends(get_current_user_web)):
     activity_kind = request.query_params.get("kind", "")
-    if activity_kind not in {"like", "comment", "follow"}:
+    if activity_kind not in {"like", "comment", "follow", "follow_request"}:
         activity_kind = ""
     rows, _ = notifications.list_notifications(
         db, me.id, limit=100, kind=activity_kind or None,
@@ -1279,7 +1290,20 @@ async def activity_page(request: Request, db: Session = Depends(get_db), me: Use
         if actor:
             actor_followed = db.execute(sa_select(Follow).where(
                 Follow.follower_id == me.id, Follow.followed_id == actor.id,
+                Follow.status == "active",
             )).scalar_one_or_none() is not None
+            # T-024: a follow_request notification carries the pending edge
+            # id so the row can render approve/reject actions (None once the
+            # edge was decided — the row then reads as history).
+            follow_request_id = None
+            if row.kind == "follow_request":
+                edge = db.execute(sa_select(Follow).where(
+                    Follow.follower_id == row.actor_id,
+                    Follow.followed_id == me.id,
+                    Follow.status == "pending",
+                )).scalar_one_or_none()
+                if edge is not None:
+                    follow_request_id = edge.id
             items.append({
                 "id": row.id,
                 "actor": _user_summary(db, actor),
@@ -1287,6 +1311,7 @@ async def activity_page(request: Request, db: Session = Depends(get_db), me: Use
                 "post_id": row.post_id,
                 "created_at": row.created_at,
                 "actor_followed": actor_followed,
+                "follow_request_id": follow_request_id,
                 "is_read": row.read_at is not None,
             })
     return _render(
@@ -1295,6 +1320,57 @@ async def activity_page(request: Request, db: Session = Depends(get_db), me: Use
         unread_count=notifications.unread_count(db, me.id),
         suggestions=_people_context(db, me)["people"][:5],
     )
+
+
+@router.post("/social/follow-requests/{request_id}/approve")
+async def follow_request_approve_submit(
+    request_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Approve a pending follow request from the activity inbox (T-024)."""
+    follow = db.get(Follow, request_id)
+    if follow is not None and follow.followed_id == me.id:
+        try:
+            social_logic.approve_follow_request(db, follow, me)
+            notifications.mark_read(db, me.id, db.execute(
+                sa_select(Activity).where(
+                    Activity.user_id == me.id,
+                    Activity.actor_id == follow.follower_id,
+                    Activity.kind == "follow_request",
+                    Activity.read_at.is_(None),
+                ).order_by(Activity.id.desc()).limit(1)
+            ).scalars().first())
+            db.commit()
+        except ValueError:
+            # Already decided (approved/rejected/cancelled) — converge.
+            db.rollback()
+    return RedirectResponse(url="/web/activity", status_code=303)
+
+
+@router.post("/social/follow-requests/{request_id}/reject")
+async def follow_request_reject_submit(
+    request_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user_web),
+):
+    """Reject a pending follow request from the activity inbox (T-024)."""
+    follow = db.get(Follow, request_id)
+    if follow is not None and follow.followed_id == me.id:
+        try:
+            social_logic.reject_follow_request(db, follow, me)
+            notifications.mark_read(db, me.id, db.execute(
+                sa_select(Activity).where(
+                    Activity.user_id == me.id,
+                    Activity.actor_id == follow.follower_id,
+                    Activity.kind == "follow_request",
+                    Activity.read_at.is_(None),
+                ).order_by(Activity.id.desc()).limit(1)
+            ).scalars().first())
+            db.commit()
+        except ValueError:
+            db.rollback()
+    return RedirectResponse(url="/web/activity", status_code=303)
 
 
 @router.post("/activity/read-all")

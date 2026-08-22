@@ -1,14 +1,23 @@
 """Post & feed business logic — creation, current-authorization, feed ordering.
 
 This module enforces audience policy at every read path. A post ID or prior
-feed page grants no access on its own; the block/friendship graph is re-checked
-for each read.
+feed page grants no access on its own; the block/friend/follow graph and the
+author's privacy flag are re-checked for each read.
 
-Audience rules (checked at read time):
-* ``ONLY_ME`` — only the author may read.
-* ``FRIENDS`` — the author and any user who is a *current, unblocked friend*
-  may read. Blocked peers (either direction) are denied.
-* ``PUBLIC`` — any authenticated, non-blocked user may read.
+Audience rules (checked at read time, privacy applies to public authors too):
+
+* ``ONLY_ME``   — only the author.
+* ``FRIENDS``   — the author and any user who is a *current, unblocked
+  friend*.  A friendship is a mutual opt-in, so it is honored even when the
+  author is private.
+* ``PUBLIC``    — any authenticated, non-blocked user ... except when the
+  author is **private** (T-024): then only friends and ACTIVE followers.
+* ``FOLLOWERS`` — the author and ACTIVE followers (pending follow requests
+  see nothing).
+
+A private author's content is never reachable through ``PUBLIC``/
+``FOLLOWERS`` by a non-following visitor; blocked pairs are denied for every
+audience.
 """
 
 from datetime import datetime, timezone
@@ -18,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ting_ting.keyset import decode_cursor, encode_cursor
 from ting_ting.models import (
-    Block, Comment, Follow, FriendRequest, Like, Mute, Post,
+    Block, Comment, FriendRequest, Like, Mute, Post,
     PostMedia, Repost, SavedPost, User, UserProfile,
 )
 from ting_ting import social
@@ -28,17 +37,43 @@ from ting_ting import social
 # Audience authorisation
 # ---------------------------------------------------------------------------
 
+def _is_friend(db: Session, user_a_id: int, user_b_id: int) -> bool:
+    """True if the pair is currently accepted-friends (either direction)."""
+    left, right = social.canonical_pair(user_a_id, user_b_id)
+    return db.execute(
+        select(FriendRequest.id).where(
+            FriendRequest.canonical_left == left,
+            FriendRequest.canonical_right == right,
+            FriendRequest.state == "accepted",
+        ).limit(1)
+    ).scalar_one_or_none() is not None
+
+
+def _private_author_gate(db: Session, author: "User", viewer_id: int) -> bool:
+    """A private author's PUBLIC/FOLLOWERS-style reach: friends or ACTIVE
+    followers only.  (Applied only for non-author viewers who are not
+    blocked.)"""
+    return _is_friend(db, author.id, viewer_id) or social.is_active_follower(
+        db, viewer_id, author.id,
+    )
+
+
 def is_visible_to(author_id: int, viewer_id: int, audience: str, db: Session) -> bool:
     """Return ``True`` if the viewer may read a post with the given audience.
 
-    Post access rules (re-evaluated on every read):
+    Post access rules (re-evaluated on every read — see module docstring for
+    the full matrix):
     * Author always sees their own post.
     * Suppressed authors (banned or self-deactivated) — denied for everyone
       else: their content leaves every feed, so a direct post id must not be
       a backdoor around feed suppression (404 keeps existence non-leaking).
     * ``ONLY_ME`` — author only.
-    * ``FRIENDS`` — author + current mutual unblocked friends.
-    * ``PUBLIC`` — every non-blocked viewer.
+    * ``FRIENDS`` — author + current mutual unblocked friends (friends stay
+      friends even when the author is private).
+    * ``PUBLIC`` — everyone, UNLESS the author is private (T-024): friends /
+      active followers only.
+    * ``FOLLOWERS`` — author + active followers; pending follow requests are
+      denied (a request is not a subscription yet).
     * Any audience — blocked pair → denied.
     """
     # Author always sees own posts.
@@ -63,17 +98,14 @@ def is_visible_to(author_id: int, viewer_id: int, audience: str, db: Session) ->
         return False
 
     if audience == "FRIENDS":
-        left, right = social.canonical_pair(author_id, viewer_id)
-        active = db.execute(
-            select(FriendRequest).where(
-                FriendRequest.canonical_left == left,
-                FriendRequest.canonical_right == right,
-                FriendRequest.state == "accepted",
-            )
-        ).scalar_one_or_none()
-        return active is not None
+        return _is_friend(db, author_id, viewer_id)
+
+    if audience == "FOLLOWERS":
+        return social.is_active_follower(db, viewer_id, author_id)
 
     if audience == "PUBLIC":
+        if author.is_private:
+            return _private_author_gate(db, author, viewer_id)
         return True
 
     # Unknown audience → deny by default.
@@ -159,17 +191,47 @@ def _friend_ids(viewer_id: int):
     )
 
 
+def _private_author_ids():
+    """Subquery: private user ids (T-024) — their PUBLIC posts are only for
+    friends / active followers, so the plain-PUBLIC branch must exclude them
+    and a dedicated branch re-admits via the relationship."""
+    return select(User.id).where(User.is_private.is_(True))
+
+
 def _others_visible_condition(viewer_id: int):
     """Visibility for posts by *other* users (own posts are handled
-    separately).  Unknown audience values fall out of the OR — deny by
-    default, matching ``is_visible_to``."""
+    separately).  Mirrors ``is_visible_to`` exactly, including the T-024
+    privacy gate: unknown audience values fall out of the OR — deny by
+    default."""
     blocked = _blocked_ids(viewer_id)
     friends = _friend_ids(viewer_id)
+    followed = social.active_followed_ids(viewer_id)
+    private_authors = _private_author_ids()
     return or_(
-        and_(Post.audience == "PUBLIC", Post.author_id.not_in(blocked)),
+        # PUBLIC by a non-private author: everyone (not blocked).
+        and_(
+            Post.audience == "PUBLIC",
+            Post.author_id.not_in(private_authors),
+            Post.author_id.not_in(blocked),
+        ),
+        # PUBLIC by a PRIVATE author: friends or active followers.
+        and_(
+            Post.audience == "PUBLIC",
+            Post.author_id.in_(private_authors),
+            or_(Post.author_id.in_(friends), Post.author_id.in_(followed)),
+            Post.author_id.not_in(blocked),
+        ),
+        # FRIENDS: current accepted friends (friendship is a mutual opt-in —
+        # privacy does not restrict it).
         and_(
             Post.audience == "FRIENDS",
             Post.author_id.in_(friends),
+            Post.author_id.not_in(blocked),
+        ),
+        # FOLLOWERS: active followers only — pending requests see nothing.
+        and_(
+            Post.audience == "FOLLOWERS",
+            Post.author_id.in_(followed),
             Post.author_id.not_in(blocked),
         ),
     )
@@ -231,10 +293,14 @@ def query_feed(
 ) -> tuple[list[Post], str | None]:
     """Return one page of the "for you" feed, newest first.
 
-    Visibility is enforced *in SQL* (no load-all-then-filter):
+    Visibility is enforced *in SQL* (no load-all-then-filter) — see
+    ``_others_visible_condition`` for the exact matrix (audience × privacy
+    × block × friend × active-follower):
     * the viewer's own posts — any audience;
-    * ``PUBLIC`` posts by non-blocked authors;
-    * ``FRIENDS`` posts by current accepted friends, not blocked.
+    * ``PUBLIC`` posts by non-blocked, non-private authors;
+    * ``PUBLIC`` posts by private authors — friends / active followers;
+    * ``FRIENDS`` posts by current accepted friends, not blocked;
+    * ``FOLLOWERS`` posts by active followers, not blocked.
 
     Returns ``(posts, next_cursor)``; ``next_cursor`` is ``None`` on the last
     page.  A malformed cursor resets to the first page instead of failing.
@@ -266,11 +332,12 @@ def query_following_feed(
     """One page of the following feed, newest first (by original post time).
 
     Feed candidates — visibility still applies to each:
-    * posts by users the viewer follows;
+    * posts by users the viewer ACTIVELY follows (a pending follow request
+      grants no access while the author is still deciding);
     * reposts: the *original* posts of posts reposted by a user the viewer
       follows (a re-shared PUBLIC thread reaches the follower's feed).
     """
-    followed = select(Follow.followed_id).where(Follow.follower_id == viewer_id)
+    followed = social.active_followed_ids(viewer_id)
     reposted_ids = select(Repost.post_id).where(Repost.user_id.in_(followed))
     visible = _others_visible_condition(viewer_id)
 

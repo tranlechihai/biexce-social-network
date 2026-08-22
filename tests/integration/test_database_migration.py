@@ -9,6 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, func, inspect, select, text
+from sqlalchemy.exc import IntegrityError
 
 from ting_ting.migrate_data import copy_database
 from ting_ting.models import (
@@ -447,5 +448,205 @@ def test_0012_sqlite_rebuild_and_dedup_roundtrip(tmp_path: Path):
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='reports'"
         ).fetchall()}
         assert "ux_reports_dedup" in names, names
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# 0013 — privacy + follow approval (activities + posts rebuild on SQLite)
+# ---------------------------------------------------------------------------
+
+def _seed_graph_at_0012(url: str) -> str:
+    """Upgrade to the pre-T-024 head (0012) and seed a small follow graph.
+
+    Returns the timestamp used by the seed rows (SQLite stores naive text).
+    """
+    _run(url, "upgrade", "20260822_0012")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now_sql = now.isoformat(sep=" ")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as c:
+            c.execute(text(
+                """
+                INSERT INTO users (id, username, email, password_hash)
+                VALUES (1, 'seed_a', 'sa@x.com', 'h'),
+                       (2, 'seed_b', 'sb@x.com', 'h'),
+                       (3, 'seed_c', 'sc@x.com', 'h')
+                """
+            ))
+            c.execute(text(
+                f"""
+                INSERT INTO posts (id, author_id, content, audience, created_at, updated_at)
+                VALUES (7, 2, 'seed public', 'PUBLIC', '{now_sql}', '{now_sql}'),
+                       (8, 1, 'seed note', 'ONLY_ME', '{now_sql}', '{now_sql}')
+                """
+            ))
+            c.execute(text(
+                f"""
+                INSERT INTO comments (id, post_id, author_id, parent_comment_id, content, created_at)
+                VALUES (9, 7, 1, NULL, 'seed comment', '{now_sql}')
+                """
+            ))
+            c.execute(text(
+                f"INSERT INTO likes (id, user_id, post_id, created_at) VALUES (9, 1, 7, '{now_sql}')"
+            ))
+            # 0012 shape: follows has NO status column.
+            c.execute(text(
+                f"""
+                INSERT INTO follows (id, follower_id, followed_id, created_at)
+                VALUES (1, 1, 2, '{now_sql}'), (2, 2, 3, '{now_sql}')
+                """
+            ))
+            c.execute(text(
+                f"""
+                INSERT INTO activities (id, user_id, actor_id, kind, post_id, created_at)
+                VALUES (1, 2, 1, 'follow', NULL, '{now_sql}'),
+                       (2, 1, 2, 'like', 7, '{now_sql}')
+                """
+            ))
+    finally:
+        engine.dispose()
+    return now_sql
+
+
+def test_0013_rebuild_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "privacy.db"
+    url = f"sqlite:///{db_path}"
+    now_sql = _seed_graph_at_0012(url)
+
+    _upgrade(url)
+
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0] == "20260822_0013"
+        # Legacy follow edges are backfilled 'active' — history never pends.
+        assert con.execute(
+            "SELECT follower_id, followed_id, status FROM follows ORDER BY id"
+        ).fetchall() == [(1, 2, "active"), (2, 3, "active")]
+        # is_private: present, defaulted false for every existing user.
+        assert con.execute(
+            "SELECT is_private FROM users ORDER BY id"
+        ).fetchall() == [(0,), (0,), (0,)]
+        # Children survived the posts rebuild; FK graph is clean.
+        assert con.execute("SELECT COUNT(*) FROM comments").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM likes").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 2
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+        # Extended domains are in the rebuilt DDL, indexes recreated.
+        posts_ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='posts'"
+        ).fetchone()[0]
+        assert "'FOLLOWERS'" in posts_ddl
+        acts_ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='activities'"
+        ).fetchone()[0]
+        assert "'follow_request'" in acts_ddl
+        index_names = {r[1] for r in con.execute("PRAGMA index_list(posts)")}
+        assert {"ix_posts_author_id", "ix_posts_created_at_id"} <= index_names, index_names
+    finally:
+        con.close()
+
+    # The new domains actually accept data (and reject everything else).
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("UPDATE users SET is_private = 1 WHERE id = 2")
+        con.execute(
+            f"INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+            f"VALUES (9, 2, 'for followers', 'FOLLOWERS', '{now_sql}', '{now_sql}')"
+        )
+        con.execute(
+            f"INSERT INTO follows (id, follower_id, followed_id, status, created_at) "
+            f"VALUES (9, 3, 2, 'pending', '{now_sql}')"
+        )
+        con.execute(
+            f"INSERT INTO activities (id, user_id, actor_id, kind, post_id, created_at) "
+            f"VALUES (9, 2, 3, 'follow_request', NULL, '{now_sql}')"
+        )
+        con.commit()
+        for sql in (
+            "INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+            f"VALUES (10, 1, 'bad', 'BOGUS', '{now_sql}', '{now_sql}')",
+            "INSERT INTO activities (id, user_id, actor_id, kind, post_id, created_at) "
+            f"VALUES (10, 1, 1, 'bogus', NULL, '{now_sql}')",
+            "INSERT INTO follows (id, follower_id, followed_id, status, created_at) "
+            f"VALUES (10, 1, 3, 'bogus', '{now_sql}')",
+        ):
+            try:
+                con.execute(sql)
+                con.commit()
+                raise AssertionError(f"bad domain value accepted: {sql[:60]}")
+            except sqlite3.IntegrityError:
+                con.rollback()
+    finally:
+        con.close()
+
+    # Downgrade WITH new-domain rows fails closed: everything rolls back.
+    with pytest.raises(IntegrityError, match="ck_activity_kind"):
+        _run(url, "downgrade", "20260822_0012")
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0] == "20260822_0013"
+        assert con.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 3
+        assert con.execute("SELECT COUNT(*) FROM follows").fetchone()[0] == 3
+        assert con.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == 3
+    finally:
+        con.close()
+
+    # After reverting the new rows the downgrade is clean.
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("UPDATE users SET is_private = 0 WHERE id = 2")
+        con.execute("DELETE FROM posts WHERE id = 9")
+        con.execute("DELETE FROM follows WHERE id = 9")
+        con.execute("DELETE FROM activities WHERE id = 9")
+        con.commit()
+    finally:
+        con.close()
+    _run(url, "downgrade", "20260822_0012")
+    con = sqlite3.connect(db_path)
+    try:
+        follow_cols = {r[1] for r in con.execute("PRAGMA table_info(follows)")}
+        user_cols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
+        posts_ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='posts'"
+        ).fetchone()[0]
+        acts_ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='activities'"
+        ).fetchone()[0]
+        assert "status" not in follow_cols
+        assert "is_private" not in user_cols
+        assert "'FOLLOWERS'" not in posts_ddl
+        assert "'follow_request'" not in acts_ddl
+        # The old domain re-rejects the values 0013 admitted.
+        try:
+            con.execute(
+                "INSERT INTO posts (id, author_id, content, audience, created_at, updated_at) "
+                f"VALUES (9, 2, 'back', 'FOLLOWERS', '{now_sql}', '{now_sql}')"
+            )
+            con.commit()
+            raise AssertionError("FOLLOWERS accepted on the 0012 shape")
+        except sqlite3.IntegrityError:
+            con.rollback()
+        assert con.execute("SELECT COUNT(*) FROM follows").fetchone()[0] == 2
+    finally:
+        con.close()
+
+    # Re-upgrade: backfill again, shapes back, rows intact.
+    _upgrade(url)
+    con = sqlite3.connect(db_path)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM follows").fetchone()[0] == 2
+        assert con.execute(
+            "SELECT status FROM follows ORDER BY id"
+        ).fetchall() == [("active",), ("active",)]
+        assert con.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0] == "20260822_0013"
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         con.close()

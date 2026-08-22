@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 
 from ting_ting.auth import get_current_user
 from ting_ting.database import get_db
-from ting_ting.models import FriendRequest, User
+from ting_ting.models import Follow, FriendRequest, User
 from ting_ting.schemas import (
+    FollowRequestResponse,
     FriendRequestRequest,
     FriendRequestResponse,
     FriendTransitionRequest,
@@ -341,3 +342,108 @@ def list_my_blocks(
         if blocked:
             results.append(_user_ref(blocked))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Follow requests (T-024: private-account follow approval)
+# ---------------------------------------------------------------------------
+
+def _follow_request_response(db: Session, follow: Follow) -> FollowRequestResponse:
+    requester = db.get(User, follow.follower_id)
+    owner = db.get(User, follow.followed_id)
+    return FollowRequestResponse(
+        id=follow.id,
+        requester=_user_ref(requester) if requester else UserRef(id=follow.follower_id, username="unknown"),
+        owner=_user_ref(owner) if owner else UserRef(id=follow.followed_id, username="unknown"),
+        status=follow.status,
+        created_at=follow.created_at.isoformat() if follow.created_at else None,
+    )
+
+
+@router.get("/follow-requests", response_model=list[FollowRequestResponse])
+def list_follow_requests(
+    direction: str = Query("inbox", description="inbox | outgoing"),
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """List pending follow requests (T-024).
+
+    * ``direction=inbox`` — users waiting on MY approval;
+    * ``direction=outgoing`` — users I requested follow (pending approval).
+    """
+    try:
+        rows = social.list_follow_requests(db, me.id, direction)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "validation_error", "message": "direction must be 'inbox' or 'outgoing'."},
+        ) from None
+    return [_follow_request_response(db, r) for r in rows]
+
+
+def _find_pending_follow(db: Session, request_id: int) -> Follow:
+    follow = db.get(Follow, request_id)
+    if follow is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "not_found", "message": "Follow request not found."},
+        )
+    if follow.status != "pending":
+        # The edge was already decided (approved / rejected / cancelled) —
+        # 409 keeps the client converging instead of acting on stale state.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "conflict", "message": "This follow request is no longer pending."},
+        )
+    return follow
+
+
+@router.post("/follow-requests/{request_id}/approve", response_model=FollowRequestResponse, status_code=status.HTTP_200_OK)
+def approve_follow_request_endpoint(
+    request_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """Approve a pending follow request (owner only) — the requester becomes
+    an ACTIVE follower and receives a ``follow`` notification."""
+    follow = _find_pending_follow(db, request_id)
+    try:
+        social.approve_follow_request(db, follow, me)
+    except ValueError as exc:
+        reason = exc.args[0]
+        if reason == "not_owner":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "Only the followed user can approve this request."},
+            ) from None
+        if reason == "blocked":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "conflict", "message": "A block prevents this action."},
+            ) from None
+        raise
+    db.commit()
+    db.refresh(follow)
+    return _follow_request_response(db, follow)
+
+
+@router.post("/follow-requests/{request_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+def reject_follow_request_endpoint(
+    request_id: int,
+    db: Session = Depends(get_db),
+    me: User = Depends(get_current_user),
+):
+    """Reject a pending follow request (owner only) — the edge is deleted;
+    the requester can follow again later."""
+    follow = _find_pending_follow(db, request_id)
+    try:
+        social.reject_follow_request(db, follow, me)
+    except ValueError as exc:
+        if exc.args[0] == "not_owner":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "forbidden", "message": "Only the followed user can reject this request."},
+            ) from None
+        raise
+    db.commit()
+    return None
