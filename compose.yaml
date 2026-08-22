@@ -16,6 +16,13 @@
 #   curl -s http://127.0.0.1:8080/ready      # {"status":"ready","database":"ok"}
 # One-time SQLite data transfer (rehearsal first — see handoff doc):
 #   docker compose --profile data run --rm data-copy
+# Daily backup (see docs/DOCKER_PG_HANDOFF.md, Backup policy):
+#   docker compose run --rm -v "$PWD/backups:/backups" app \
+#     python scripts/backup_restore.py backup \
+#       --out "/backups/backup-$(date +%Y%m%d-%H%M%S).sql.gz" --uploads-dir /app/uploads
+#   # self-check (creates + drops a throwaway DB on the SAME cluster):
+#   docker compose run --rm -v "$PWD/backups:/backups" app \
+#     python scripts/backup_restore.py verify --file /backups/backup-<ts>.sql.gz
 #
 # Notes:
 #   * `db` publishes NO port: PostgreSQL is reachable only on the internal
@@ -42,6 +49,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+    # Contained blast radius: the DB must not swallow the whole host.
+    # 1 GiB is generous for v1 traffic (shared_buffers default ~125 MiB).
+    mem_limit: 1g
+    cpus: 2
+    # A clean PG shutdown (checkpoint + WAL flush) takes longer than the
+    # 10s default; give it 30s so SIGTERM stops never become SIGKILL.
+    stop_grace_period: 30s
 
   migration:
     build: .
@@ -98,6 +112,11 @@ services:
       timeout: 4s
       retries: 12
       start_period: 15s
+    # Single-worker Flask/uvicorn app: 512 MiB / 1 CPU is far above its
+    # steady-state footprint; pids_limit caps fork-bomb style abuse.
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 256
 
 volumes:
   pgdata:

@@ -44,6 +44,11 @@ RUN pip install --no-cache-dir -r requirements.lock \
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 
+# Ops tooling (backup/restore/verify): lets IT run
+# `docker compose run --rm app python scripts/backup_restore.py ...`
+# without a separate checkout on the deploy host.
+COPY scripts ./scripts
+
 RUN mkdir -p /app/uploads && chown app:app /app/uploads
 
 USER app

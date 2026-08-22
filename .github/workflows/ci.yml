@@ -66,6 +66,14 @@ jobs:
           export TING_DATABASE_URL="postgresql+psycopg://ci:ci@localhost:5432/biexce_test"
           export TING_PG_TEST_URL="$TING_DATABASE_URL"
           pytest -q tests/integration/test_pg_cutover.py
+      - name: Backup/restore roundtrip on the gate database
+        # Proves recoverability with the exact tool operators use: snapshot
+        # the gate data, restore it into a throwaway database at alembic
+        # head, and compare row counts + full-row fingerprints.
+        run: |
+          export TING_DATABASE_URL="postgresql+psycopg://ci:ci@localhost:5432/biexce_test"
+          python scripts/backup_restore.py backup --out /tmp/biexce-backup.sql.gz
+          python scripts/backup_restore.py verify --file /tmp/biexce-backup.sql.gz
       - name: Validate compose file
         env:
           POSTGRES_PASSWORD: ci-placeholder

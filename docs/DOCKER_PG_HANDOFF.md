@@ -8,18 +8,24 @@ bước kèm kết quả mong đợi để IT gửi lại làm evidence.
 
 Trạng thái repo tại thời điểm bàn giao:
 
-- Migration chain `0001→0011` chạy sạch trên **cả hai** dialect; nhánh PG
-  đã sửa đầy đủ bằng `20260821_0011_postgres_parity` (mute check constraint,
-  `hidden_posts`, default `reports.status='pending'`, re-anchor sequences).
+- Migration chain `0001→0012` chạy sạch trên **cả hai** dialect; nhánh PG
+  đã sửa đầy đủ bằng `20260821_0011_postgres_parity`, `0012` thêm unique
+  index NULL-safe cho báo cáo (T-015E).
 - App **từ chối khởi động** nếu PostgreSQL không alembic-stamp, hoặc stamp
   ≠ head; DB PG rỗng được app tự migrate khi start.
-- `Dockerfile` (non-root, Python 3.13), `compose.yaml` (db / migration /
-  data-copy / app), `.dockerignore` đã có trong repo.
-- `tests/integration/test_pg_cutover.py` là **gate PG**: migrations thật,
-  4 sửa 0011, copy roundtrip + sequence, API smoke — CI job `postgres`
-  chạy tự động trên `postgres:16`; máy dev hiện **chưa có quyền
-  docker.sock** nên gate này xác nhận qua CI (hoặc IT chạy local).
-- Dev DB (SQLite) đang ở `0011` (head), service `:8080` ready.
+- `Dockerfile` (non-root, Python 3.13, chứa cả `scripts/` cho ops),
+  `compose.yaml` (db / migration / data-copy / app + resource limits),
+  `.dockerignore` đã có trong repo.
+- `tests/integration/test_pg_cutover.py` là **gate PG** (7 test: migrations
+  thật, 4 sửa 0011, copy roundtrip + sequence, follow persist, API smoke) —
+  CI job `postgres` chạy tự động trên `postgres:16`, kèm **bước
+  backup/restore roundtrip** (`scripts/backup_restore.py` backup → verify
+  trên data thật của gate).
+- `scripts/backup_restore.py` — công cụ backup/verify/restore chuẩn
+  (snapshot 1 transaction, psql-compat gzip, verify = restore vào DB tạm
+  + fingerprint toàn bộ dòng). Đã diễn tập live trên DB dev PG.
+- Dev hiện chạy PostgreSQL (container IT, `127.0.0.1:5433`), DB đã ở `0012`,
+  service `:8080` ready; rollback là file SQLite snapshot (mục 6).
 
 ---
 
@@ -132,8 +138,8 @@ ls -la backups/ | tail -3                            # MONG ĐỢI: 2 file mới
 cd <DEPLOY_DIR>
 docker compose up -d db                              # MONG ĐỢI: db "healthy"
 docker compose exec db pg_isready                    # MONG ĐỢI: "accepting connections"
-docker compose run --rm migration                    # MONG ĐỢI: alembic 0001..0011, exit 0
-docker compose run --rm migration alembic current    # MONG ĐỢI: "20260821_0011 (head)"
+docker compose run --rm migration                    # MONG ĐỢI: alembic 0001..0012, exit 0
+docker compose run --rm migration alembic current    # MONG ĐỢI: "20260822_0012 (head)"
 docker compose exec db psql -U biexce_social -d biexce_social \
   -c "select count(*) from users"                    # MONG ĐỢI: 0
 ```
@@ -191,12 +197,20 @@ Smoke nghiệp vụ (dev chạy hoặc IT hỗ trợ, tài khoản thật):
 # MONG ĐỢI: không 5xx; log app không exception
 ```
 
-### Bước G — Chốt cửa sổ + backup PG
+### Bước G — Chốt cửa sổ + backup PG chuẩn
 
 ```bash
-docker compose exec db pg_dump -Fc -U biexce_social -d biexce_social \
-  -f /tmp/after-migration.dump
-docker cp db:/tmp/after-migration.dump <DEPLOY_DIR>/backups/
+# Backup chuẩn bằng công cụ của repo (chứa trong image, chạy qua compose):
+docker compose run --rm -v "$PWD/backups:/backups" app \
+  python scripts/backup_restore.py backup \
+    --out "/backups/backup-$(date +%Y%m%d-%H%M%S).sql.gz" \
+    --uploads-dir /app/uploads
+# MONG ĐỢI: "BACKUP OK file=... tables=17 rows=... revision=20260822_0012"
+# (+ file .uploads.tar.gz bên cạnh)
+# Verify ngay tại chỗ (tự tạo + tự xoá DB tạm):
+docker compose run --rm -v "$PWD/backups:/backups" app \
+  python scripts/backup_restore.py verify --file /backups/backup-*.sql.gz
+# MONG ĐỢI: "VERIFY OK file=... tables=17 revision=20260822_0012"
 # Restart để chứng nhận volume bền (data + uploads không mất):
 docker compose restart app && sleep 5 && curl -s http://127.0.0.1:8080/ready
 # MONG ĐỢI: {"status":"ready","database":"ok"}
@@ -204,9 +218,20 @@ docker compose restart app && sleep 5 && curl -s http://127.0.0.1:8080/ready
 # NGUYÊN (rollback target) 7 ngày kể từ hôm chuyển.
 ```
 
-Bắt đầu cron backup PG thay cron SQLite (mục 3 RUNBOOK):
-`docker compose exec db pg_dump -Fc -U biexce_social -d biexce_social -f /tmp/biexce-$(date +%F).dump`
-rồi `docker cp` ra `backups/`.
+Backup hằng ngày (cron IT, thay cron SQLite cũ — chi tiết mục 8):
+
+```bash
+docker compose run --rm -v "$PWD/backups:/backups" app \
+  python scripts/backup_restore.py backup \
+    --out "/backups/backup-$(date +%Y%m%d-%H%M%S).sql.gz" \
+    --uploads-dir /app/uploads \
+  && python scripts/backup_restore.py verify --file /backups/backup-$(date +%Y%m%d)*.sql.gz
+```
+
+(Giải thích: file backup là SQL gzip psql-compat — vẫn restore được bằng
+`gunzip -c file.sql.gz | psql -v ON_ERROR_STOP=1 -d db_trong_` nếu cần —
+nhưng `backup_restore.py verify/restore` là đường chuẩn vì tự kiểm revision,
+đồng FK-order, re-anchor sequence và fingerprint toàn bộ dòng.)
 
 ## 5. Evidence IT gửi lại dev (để đặt trạng thái Done)
 
@@ -217,7 +242,8 @@ rồi `docker cp` ra `backups/`.
 4. Số file uploads 2 phía (bước E).
 5. `/health`, `/ready`, `docker compose logs app --tail 50` (bước F).
 6. Kết quả smoke nghiệp vụ (screenshot hoặc log).
-7. File `after-migration.dump` tồn tại + `/ready` sau restart (bước G).
+7. File backup `BACKUP OK` + `VERIFY OK` đầu tiên (bước G) + `/ready` sau
+   restart.
 
 ## 6. Rollback (trong cửa sổ 7 ngày đầu)
 
@@ -227,22 +253,81 @@ rồi `docker cp` ra `backups/`.
 3. Bật lại `biexce-social-user.service` (`.env` vẫn trỏ SQLite).
 4. `curl /health` + `/ready` → thông báo user: **dữ liệu tạo mới từ thời
    điểm copy sẽ mất** (đã cảnh báo trước khi đóng write).
-5. Muốn cứu data mới trên PG: `after-migration.dump` (bước G) hoặc giữ
-   volume `pgdata` không xóa.
+5. Muốn cứu data mới trên PG: dùng restore chuẩn (mục 8.2) từ backup gần
+   nhất — hoặc giữ nguyên volume `pgdata` không xóa.
 
 Sau 7 ngày ổn định: disable service SQLite cũ; giữ file SQLite làm archive;
-xác định cron backup PG là chuẩn.
+xác nhận cron backup + restore drill (mục 8) là chuẩn vận hành.
 
 ## 7. Acceptance (đạt tất cả mới tính "chuyển xong")
 
-- [x] Migrations `0001→0011` áp dụng trên PG thật (CI job `postgres`).
+- [x] Migrations `0001→0012` áp dụng trên PG thật (CI job `postgres`).
 - [x] App từ chối khởi động khi PG không stamp / stamp ≠ head (test gate).
 - [x] `docker compose config` + build xanh; image không chứa file cấm (CI).
+- [x] Backup/restore roundtrip bằng `scripts/backup_restore.py` trên PG thật
+      (CI chạy hằng commit + diễn tập live trên DB dev 2026-08-22).
 - [ ] Image chạy non-root, PG không publish port (IT confirm bước A/C).
 - [ ] Copy toàn bộ SQLite + uploads, count khớp — **giữ dữ liệu cũ**
       (quyết định 2026-08-21) (bước D/E).
 - [ ] Insert dữ liệu mới sau import không lỗi sequence (bước F, test gate
       đã chứng minh cơ chế; IT smoke xác nhận thực tế).
 - [ ] `/health`, `/ready` 200; smoke nghiệp vụ xanh (bước F).
-- [ ] `pg_dump` + restart container → data + uploads còn (bước G).
-- [ ] IT xác nhận cron backup/restore định kỳ chạy được (bước G + RUNBOOK §3).
+- [ ] `BACKUP OK` + `VERIFY OK` + restart container → data + uploads còn (bước G).
+- [ ] IT xác nhận cron backup hằng ngày + 1 restore drill (mục 8).
+
+## 8. Backup policy + restore runbook + cảnh báo môi trường dev
+
+### 8.1 Chính sách backup (IT đặt cron theo mục này)
+
+| Hạng mục | Chuẩn |
+|---|---|
+| Công cụ | `scripts/backup_restore.py backup` (snapshot 1 transaction, revision-stamped, gzip, psql-compat) |
+| uploads | `--uploads-dir /app/uploads` → file `.uploads.tar.gz` bên cạnh, **cùng timestamp** (restore phải lấy 2 file đôi) |
+| Tần suất | Hằng ngày, khung giờ ít traffic (gợi ý 03:00); mỗi lần backup kèm `verify` |
+| Retention | Daily × 7, weekly × 4, monthly × 3 (cron `find backups \( -name '*.sql.gz' -o -name '*.uploads.tar.gz' \) -mtime +N -delete` tương ứng — xoá đúng ĐÔI cùng timestamp) |
+| Offsite | Copy ít nhất 1 bản daily/weekly ra NAS/S3 của IT (file là plaintext-SQL gzip — **chuẩn hoá mã hoá offsite do IT quyết**; trên host giữ nguyên để restore nhanh) |
+| Giám sát | Cron log + cảnh báo khi KHÔNG có backup mới trong 26h; IT xác nhận |
+| RPO mục tiêu | ≤ 24h (backup daily). Trong cửa sổ migration 7 ngày đầu: backup ngay trước khi dừng write |
+
+Mặc định KHÔNG có PITR: nếu mất giữa 2 backup, mất ≤ RPO. Nếu sau này cần
+RPO phút (streaming WAL) → đề xuất riêng cho IT, ngoài phạm vi hiện tại.
+
+### 8.2 Restore runbook (khi cần — đọc trước khi sự cố)
+
+```bash
+# 0) Chọn file backup (luôn đi ĐÔI: .sql.gz + .uploads.tar.gz cùng timestamp)
+# 1) Đóng write:
+docker compose stop app
+# 2) Tạo DB mục tiêu RỖNG + migrate lên head:
+docker compose run --rm -e TING_DATABASE_URL=...biexce_social_restore \
+  migration alembic upgrade head        # (hoặc tạo DB trong psql rồi migrate)
+# 3) Restore (từ chối tự động nếu DB mục tiêu không rỗng):
+docker compose run --rm -v "$PWD/backups:/backups" -e \
+  TING_DATABASE_URL='postgresql+psycopg://biexce_social:${POSTGRES_PASSWORD}@db:5432/biexce_social_restore' \
+  app python scripts/backup_restore.py restore \
+    --file /backups/backup-<ts>.sql.gz --yes
+# 4) Đổi app sang DB đã restore (TING_DATABASE_URL trong compose/env)
+# 5) Khôi phục uploads (file đôi .uploads.tar.gz):
+tar -xzf backup-<ts>.uploads.tar.gz -C /tmp/restore-uploads
+docker compose cp /tmp/restore-uploads/uploads/. biexce-social-app-1:/app/uploads
+#    (tên container thật: docker compose ps -q app)
+# 6) docker compose up -d app && curl -s localhost:8080/ready
+#    → verify nghiệp vụ (đăng nhập, feed) trước khi thông báo user
+```
+
+Nguyên tắc: **luôn drill restore ít nhất 1 lần mỗi quý** trên DB tạm
+(`verify` đã làm tương đương 90% — tạo DB tạm, migrate, restore, fingerprint
+toàn bộ dòng) và sau mỗi lần đổi schema lớn.
+
+### 8.3 ⚠ Cảnh báo môi trường dev (không dùng cho production)
+
+- PostgreSQL dev là **container do IT chạy** tại `127.0.0.1:5433` với
+  `postgres/postgres` và (được ghi nhận) listen **`0.0.0.0:5433`** — nghĩa là
+  hở trên mọi interface của máy dev. Chấp nhận vì mạng nội bộ văn phòng,
+  **NHƯNG**: production (compose) phải khác hoàn toàn — mật khẩu sinh bằng
+  `openssl rand -hex 16`, không reuse `5433`/`postgres` user, PG không
+  publish port (compose đã làm vậy).
+- Dev container đó **không thuộc** compose project của repo (nên không có
+  volume `pgdata`/healthcheck do ta quản lý) — IT giữ riêng; khi làm backup
+  dev, dùng `scripts/backup_restore.py` với `--url` trỏ 5433 (đã diễn tập).
+- File `backups/` của dev chỉ là diễn tập — không phải backup chính thức.
